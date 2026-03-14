@@ -1,0 +1,6 @@
+guest_name,arrival_date,departure_date,room_number,guest_phone,language,reservation_id
+Alice Smith,2026-01-10,2026-01-12,101,27820000001,en,RSV-1001
+Bob Jones,2026-01-09,2026-01-13,102,27820000002,en,RSV-1002
+Carol Naidoo,2026-01-11,2026-01-15,103,27820000003,en,RSV-1003
+David Mokoena,2026-01-08,2026-01-11,104,27820000004,en,RSV-1004
+Eve Patel,2026-01-10,2026-01-14,105,27820000005,en,RSV-1005
