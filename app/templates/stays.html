@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Guest Stays — Hotel SLA{% endblock %}
+
+{% block content %}
+<h1>Guest Stays</h1>
+
+{% if user.is_manager %}
+<div class="card">
+  <h2>Import CSV</h2>
+  <p style="font-size:.85rem;color:#555;margin-bottom:.75rem">
+    Required columns: <code>guest_name, arrival_date, departure_date, room_number</code><br>
+    Optional: <code>guest_phone, language, reservation_id</code> &nbsp;|&nbsp; Date format: <code>YYYY-MM-DD</code>
+  </p>
+  <form method="post" action="/dashboard/stays/import" enctype="multipart/form-data" style="display:flex;gap:.75rem;align-items:flex-end">
+    <div style="flex:1">
+      <label>CSV file</label>
+      <input type="file" name="file" accept=".csv" required/>
+    </div>
+    <button type="submit" class="btn btn-primary">Import</button>
+  </form>
+  {% if import_msg is defined %}
+  <div class="alert {% if 'failed' in import_msg %}alert-error{% else %}alert-success{% endif %}" style="margin-top:.75rem">
+    {{ import_msg }}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Current &amp; upcoming stays ({{ stays | length }})</h2>
+  {% if not stays %}
+  <p style="color:#888">No upcoming stays found.</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>Guest</th><th>Room</th><th>Arrival</th><th>Departure</th><th>Phone</th><th>Lang</th><th>Reservation</th></tr>
+    </thead>
+    <tbody>
+      {% for s in stays %}
+      <tr>
+        <td>{{ s.guest_name }}</td>
+        <td>{{ s.room_number }}</td>
+        <td>{{ s.arrival_date }}</td>
+        <td>{{ s.departure_date }}</td>
+        <td>{{ s.guest_phone or '—' }}</td>
+        <td>{{ s.language or '—' }}</td>
+        <td>{{ s.reservation_id or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

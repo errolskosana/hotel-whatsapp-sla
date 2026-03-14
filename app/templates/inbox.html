@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Inbox — Hotel SLA{% endblock %}
+
+{% block content %}
+<h1>Inbox
+  {% if unactioned_count > 0 %}
+  <span style="background:#e53e3e;color:#fff;font-size:.75rem;border-radius:9px;padding:3px 9px;margin-left:8px;vertical-align:middle">
+    {{ unactioned_count }} unactioned
+  </span>
+  {% endif %}
+</h1>
+
+<!-- Filters -->
+<div class="card" style="padding:.75rem 1rem">
+  <form method="get" style="display:flex;gap:.75rem;align-items:flex-end;flex-wrap:wrap">
+    <div>
+      <label>Status</label>
+      <select name="status_filter" style="width:auto">
+        <option value="all" {% if status_filter=='all' %}selected{% endif %}>All</option>
+        <option value="unactioned" {% if status_filter=='unactioned' %}selected{% endif %}>Unactioned</option>
+        <option value="acknowledged" {% if status_filter=='acknowledged' %}selected{% endif %}>Acknowledged</option>
+        <option value="replied" {% if status_filter=='replied' %}selected{% endif %}>Replied</option>
+        <option value="auto_replied" {% if status_filter=='auto_replied' %}selected{% endif %}>Auto-replied</option>
+      </select>
+    </div>
+    <div>
+      <label>Room</label>
+      <select name="room_filter" style="width:auto">
+        <option value="">All rooms</option>
+        {% for r in rooms %}
+        <option value="{{ r.room_number }}" {% if room_filter==r.room_number %}selected{% endif %}>{{ r.room_number }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button type="submit" class="btn btn-primary btn-sm">Filter</button>
+    <a href="/dashboard/inbox" class="btn btn-sm" style="background:#e5e7eb;color:#333">Reset</a>
+  </form>
+</div>
+
+{% if not conv_data %}
+<p style="color:#888;margin-top:1rem">No conversations match the current filters.</p>
+{% endif %}
+
+{% for item in conv_data %}
+{% set conv = item.conv %}
+{% set msgs = item.msgs %}
+{% set guest = item.guest %}
+{% set escalated_ids = item.escalated_ids %}
+
+<div class="card" style="margin-bottom:1.25rem">
+  <!-- Conversation header -->
+  <div style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem;flex-wrap:wrap">
+    <div style="flex:1;min-width:200px">
+      <strong>{{ conv.wa_id }}</strong>
+      {% if conv.opted_out %}
+      <span style="background:#f3f4f6;color:#6b7280;font-size:.75rem;padding:1px 7px;border-radius:9px;margin-left:6px">opted out</span>
+      {% endif %}
+      {% if conv.room_number %}
+      <span style="font-size:.82rem;color:#2563eb;margin-left:6px">Room {{ conv.room_number }}</span>
+      {% endif %}
+    </div>
+    {% if guest %}
+    <div style="font-size:.82rem;color:#555;text-align:right">
+      <strong>{{ guest.guest_name }}</strong><br>
+      {{ guest.arrival_date }} → {{ guest.departure_date }}
+      {% if guest.language %} &bull; {{ guest.language }}{% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Message thread -->
+  <div style="border:1px solid #e5e7eb;border-radius:8px;padding:.75rem;background:#fafafa;max-height:320px;overflow-y:auto">
+    {% for m in msgs %}
+    <div>
+      <div class="msg-bubble {{ 'msg-out' if m.direction == 'out' else 'msg-in' }}">
+        {{ m.body }}
+        {% if m.id|string in escalated_ids %}
+        <span style="font-size:.7rem;color:#9a3412;margin-left:6px" title="SLA breach escalated">&#9888;</span>
+        {% endif %}
+      </div>
+      <div class="msg-meta {{ 'text-right' if m.direction == 'out' else '' }}" style="{% if m.direction == 'out' %}text-align:right{% endif %}">
+        {{ m.received_at.strftime('%d %b %H:%M') }}
+        &bull;
+        <span class="badge-status badge-{{ m.status }}">{{ m.status }}</span>
+        {% if m.wa_status %}
+        &bull; <span style="color:#888">{{ m.wa_status }}</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Actions on the latest inbound message -->
+  {% set latest_in = msgs | selectattr("direction", "equalto", "in") | list | last %}
+  {% if latest_in and latest_in.status == "unactioned" and not conv.opted_out %}
+  <div style="display:flex;gap:.5rem;margin-top:.75rem;flex-wrap:wrap;align-items:center">
+    <form action="/api/messages/{{ latest_in.id }}/ack" method="post" style="display:inline">
+      <button class="btn btn-sm" style="background:#f59e0b;color:#fff">Acknowledge</button>
+    </form>
+    <form action="/api/messages/{{ latest_in.id }}/reply" method="post" style="display:flex;gap:.5rem;flex:1;min-width:220px">
+      <input name="reply" placeholder="Type reply…" style="flex:1"/>
+      <button class="btn btn-primary btn-sm">Send</button>
+    </form>
+  </div>
+  {% elif latest_in and latest_in.status in ("acknowledged",) and not conv.opted_out %}
+  <div style="margin-top:.75rem">
+    <form action="/api/messages/{{ latest_in.id }}/reply" method="post" style="display:flex;gap:.5rem">
+      <input name="reply" placeholder="Type reply…" style="flex:1"/>
+      <button class="btn btn-primary btn-sm">Send</button>
+    </form>
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Auto-refresh page when SSE reports new unactioned messages
+(function() {
+  if (!window.EventSource) return;
+  let lastCount = {{ unactioned_count }};
+  const es = new EventSource('/api/sse/inbox');
+  es.onmessage = function(e) {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.unactioned > lastCount) {
+        window.location.reload();
+      }
+      lastCount = d.unactioned;
+    } catch(_) {}
+  };
+})();
+</script>
+{% endblock %}

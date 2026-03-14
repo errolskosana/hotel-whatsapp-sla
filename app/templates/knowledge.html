@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Knowledge Base — Hotel SLA{% endblock %}
+
+{% block content %}
+<h1>Knowledge Base</h1>
+<p style="color:#555;margin-bottom:1.25rem;font-size:.9rem">
+  These entries are used by the AI to auto-answer guest questions. Add factual hotel information only.
+</p>
+
+<div class="card">
+  <h2>Add entry</h2>
+  <form method="post" action="/dashboard/knowledge">
+    <div class="form-row">
+      <label for="content">Content</label>
+      <textarea id="content" name="content" rows="3" placeholder="e.g. Room service is available 24/7. Call ext. 0 from your room."></textarea>
+    </div>
+    <button type="submit" class="btn btn-primary">Add</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Entries ({{ chunks | length }})</h2>
+  {% if not chunks %}
+  <p style="color:#888">No entries yet. Add some hotel information above.</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>Content</th><th>Active</th><th>Added</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for c in chunks %}
+      <tr>
+        <td>{{ c.content }}</td>
+        <td>{{ "Yes" if c.is_active else "No" }}</td>
+        <td style="white-space:nowrap">{{ c.created_at.strftime('%d %b %Y') }}</td>
+        <td>
+          <form action="/dashboard/knowledge/{{ c.id }}/delete" method="post" onsubmit="return confirm('Delete this entry?')">
+            <button class="btn btn-danger btn-sm">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Settings — Hotel SLA{% endblock %}
+
+{% block content %}
+<h1>Settings</h1>
+
+{% if msg %}
+<div class="alert alert-success">{{ msg }}</div>
+{% endif %}
+
+<div class="card">
+  <h2>SLA Threshold</h2>
+  <p style="font-size:.85rem;color:#555;margin-bottom:.75rem">
+    Seconds before an unactioned inbound message triggers an escalation alert.
+  </p>
+  <form method="post" action="/dashboard/settings/sla" style="display:flex;gap:.75rem;align-items:flex-end">
+    <div>
+      <label>Seconds</label>
+      <input type="number" name="sla_seconds" value="{{ hotel.sla_seconds }}" min="5" max="3600" style="width:100px"/>
+    </div>
+    <button type="submit" class="btn btn-primary">Save</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Hotel</h2>
+  <table style="width:auto">
+    <tr><td style="padding:5px 10px 5px 0;color:#666">Name</td><td><strong>{{ hotel.name }}</strong></td></tr>
+    <tr><td style="padding:5px 10px 5px 0;color:#666">Hotel ID</td><td><code style="font-size:.85rem">{{ hotel.id }}</code></td></tr>
+    <tr><td style="padding:5px 10px 5px 0;color:#666">WA Phone Number ID</td><td><code style="font-size:.85rem">{{ hotel.whatsapp_phone_number_id }}</code></td></tr>
+    <tr><td style="padding:5px 10px 5px 0;color:#666">Manager WA</td><td>{{ hotel.manager_wa_e164 }}</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Staff users</h2>
+  <table>
+    <thead>
+      <tr><th>Email</th><th>Role</th><th>Active</th><th>Created</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for s in staff %}
+      <tr>
+        <td>{{ s.email }}</td>
+        <td>{{ s.role }}</td>
+        <td>{{ "Yes" if s.is_active else "No" }}</td>
+        <td>{{ s.created_at.strftime('%d %b %Y') }}</td>
+        <td>
+          {% if s.is_active and s.id|string != user.staff_user_id %}
+          <form action="/dashboard/settings/staff/{{ s.id }}/deactivate" method="post" onsubmit="return confirm('Deactivate {{ s.email }}?')">
+            <button class="btn btn-danger btn-sm">Deactivate</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2 style="margin-top:1.25rem">Add staff user</h2>
+  <form method="post" action="/dashboard/settings/staff/add" style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-end;margin-top:.5rem">
+    <div>
+      <label>Email</label>
+      <input type="email" name="email" placeholder="agent@hotel.com" required style="width:220px"/>
+    </div>
+    <div>
+      <label>Password</label>
+      <input type="password" name="password" placeholder="••••••••" required style="width:160px"/>
+    </div>
+    <div>
+      <label>Role</label>
+      <select name="role" style="width:120px">
+        <option value="agent">Agent</option>
+        <option value="manager">Manager</option>
+      </select>
+    </div>
+    <button type="submit" class="btn btn-primary">Add</button>
+  </form>
+</div>
+{% endblock %}

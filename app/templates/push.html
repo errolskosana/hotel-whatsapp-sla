@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Push Setup — Hotel SLA{% endblock %}
+
+{% block content %}
+<h1>Web Push Setup</h1>
+<div class="card">
+  <p style="margin-bottom:1rem;color:#555">
+    Subscribe this browser to receive escalation alerts even when the dashboard is not open.
+  </p>
+  <ol style="margin-left:1.25rem;margin-bottom:1rem;color:#444;font-size:.9rem">
+    <li>Click <strong>Subscribe</strong> and allow browser notifications when prompted.</li>
+    <li>Open DevTools console to see subscription status.</li>
+  </ol>
+  <button id="btn" class="btn btn-primary">Subscribe for push alerts</button>
+  <p id="status" style="margin-top:.75rem;font-size:.88rem;color:#555"></p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/pwa.js"></script>
+{% endblock %}

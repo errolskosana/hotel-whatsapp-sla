@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Analytics — Hotel SLA{% endblock %}
+
+{% block content %}
+<h1>Analytics <span style="font-size:.85rem;font-weight:400;color:#888">Last 7 days</span></h1>
+
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:1.5rem">
+  <div class="card" style="text-align:center">
+    <div style="font-size:2.2rem;font-weight:700;color:#2563eb">{{ total_in }}</div>
+    <div style="font-size:.85rem;color:#555">Inbound messages</div>
+  </div>
+  <div class="card" style="text-align:center">
+    <div style="font-size:2.2rem;font-weight:700;color:#16a34a">{{ total_replied }}</div>
+    <div style="font-size:.85rem;color:#555">Replied</div>
+  </div>
+  <div class="card" style="text-align:center">
+    <div style="font-size:2.2rem;font-weight:700;color:#dc2626">{{ total_escalated }}</div>
+    <div style="font-size:.85rem;color:#555">SLA breaches</div>
+  </div>
+  <div class="card" style="text-align:center">
+    <div style="font-size:2.2rem;font-weight:700;color:{{ '#dc2626' if breach_rate > 10 else '#d97706' if breach_rate > 0 else '#16a34a' }}">
+      {{ breach_rate }}%
+    </div>
+    <div style="font-size:.85rem;color:#555">Breach rate</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>SLA Configuration</h2>
+  {% if hotel %}
+  <p style="font-size:.9rem;color:#444;margin-bottom:.5rem">
+    Current SLA threshold: <strong>{{ hotel.sla_seconds }} seconds</strong>
+    {% if user.is_manager %}
+    &nbsp;&mdash;&nbsp; <a href="/dashboard/settings">Change in Settings</a>
+    {% endif %}
+  </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Recent escalations</h2>
+  {% if not escalations %}
+  <p style="color:#888">No escalations in this period.</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>Triggered</th><th>Status</th><th>WhatsApp notified</th><th>Push notified</th><th>Resolved</th></tr>
+    </thead>
+    <tbody>
+      {% for e in escalations %}
+      <tr>
+        <td>{{ e.triggered_at.strftime('%d %b %H:%M') }}</td>
+        <td><span class="badge-status badge-{{ e.status }}">{{ e.status }}</span></td>
+        <td>{{ e.whatsapp_notified_at.strftime('%H:%M:%S') if e.whatsapp_notified_at else '—' }}</td>
+        <td>{{ e.push_notified_at.strftime('%H:%M:%S') if e.push_notified_at else '—' }}</td>
+        <td>{{ e.resolved_at.strftime('%d %b %H:%M') if e.resolved_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Rooms — Hotel SLA{% endblock %}
+
+{% block content %}
+<h1>Rooms</h1>
+
+{% if user.is_manager %}
+<div class="card">
+  <h2>Add room</h2>
+  <form method="post" action="/dashboard/rooms" style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-end">
+    <div>
+      <label>Room number</label>
+      <input name="room_number" type="text" placeholder="e.g. 201" style="width:120px" required/>
+    </div>
+    <div>
+      <label>Type</label>
+      <select name="room_type" style="width:140px">
+        <option value="standard">Standard</option>
+        <option value="deluxe">Deluxe</option>
+        <option value="suite">Suite</option>
+        <option value="penthouse">Penthouse</option>
+      </select>
+    </div>
+    <button type="submit" class="btn btn-primary">Add</button>
+  </form>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>All rooms ({{ rooms | length }})</h2>
+  {% if not rooms %}
+  <p style="color:#888">No rooms configured yet.</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>Room</th><th>Type</th><th>Status</th><th>Created</th>{% if user.is_manager %}<th></th>{% endif %}</tr>
+    </thead>
+    <tbody>
+      {% for r in rooms %}
+      <tr>
+        <td><strong>{{ r.room_number }}</strong></td>
+        <td>{{ r.room_type }}</td>
+        <td>{{ r.status }}</td>
+        <td>{{ r.created_at.strftime('%d %b %Y') }}</td>
+        {% if user.is_manager %}
+        <td>
+          <form action="/dashboard/rooms/{{ r.id }}/delete" method="post" onsubmit="return confirm('Delete room {{ r.room_number }}?')">
+            <button class="btn btn-danger btn-sm">Delete</button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

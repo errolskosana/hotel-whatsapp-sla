@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{% block title %}Hotel SLA{% endblock %}</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #222; }
+    nav {
+      background: #1a1a2e; color: #fff; padding: 0 1.5rem;
+      display: flex; align-items: center; gap: 1.5rem; height: 52px;
+    }
+    nav .brand { font-weight: 700; font-size: 1.1rem; color: #7eb8ff; text-decoration: none; }
+    nav a { color: #ccc; text-decoration: none; font-size: .9rem; }
+    nav a:hover, nav a.active { color: #fff; }
+    nav .spacer { flex: 1; }
+    nav .badge {
+      background: #e53e3e; color: #fff; font-size: .75rem;
+      border-radius: 9px; padding: 2px 7px; margin-left: 4px; vertical-align: middle;
+    }
+    nav form { display: inline; }
+    nav button {
+      background: none; border: 1px solid #555; color: #ccc; cursor: pointer;
+      padding: 4px 10px; border-radius: 4px; font-size: .85rem;
+    }
+    nav button:hover { border-color: #aaa; color: #fff; }
+    main { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.4rem; margin-bottom: 1rem; }
+    h2 { font-size: 1.15rem; margin-bottom: .75rem; }
+    .card { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.1); padding: 1.25rem; margin-bottom: 1rem; }
+    .btn { display: inline-block; padding: 6px 14px; border-radius: 5px; border: none; cursor: pointer; font-size: .88rem; }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-danger { background: #dc2626; color: #fff; }
+    .btn-danger:hover { background: #b91c1c; }
+    .btn-sm { padding: 3px 9px; font-size: .8rem; }
+    input[type=text], input[type=email], input[type=password], input[type=number],
+    select, textarea {
+      border: 1px solid #d1d5db; border-radius: 5px; padding: 6px 10px;
+      font-size: .9rem; width: 100%;
+    }
+    input:focus, select:focus, textarea:focus { outline: 2px solid #2563eb; border-color: #2563eb; }
+    label { font-size: .85rem; font-weight: 600; display: block; margin-bottom: 3px; }
+    .form-row { margin-bottom: .75rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th { text-align: left; padding: 8px 10px; background: #f0f0f0; border-bottom: 2px solid #ddd; }
+    td { padding: 7px 10px; border-bottom: 1px solid #eee; vertical-align: top; }
+    tr:hover td { background: #fafafa; }
+    .badge-status { display: inline-block; padding: 2px 8px; border-radius: 9px; font-size: .78rem; font-weight: 600; }
+    .badge-unactioned { background: #fee2e2; color: #991b1b; }
+    .badge-acknowledged { background: #fef3c7; color: #92400e; }
+    .badge-replied { background: #d1fae5; color: #065f46; }
+    .badge-auto_replied { background: #dbeafe; color: #1e40af; }
+    .badge-escalated { background: #fde8d8; color: #9a3412; }
+    .msg-bubble { padding: 6px 10px; border-radius: 8px; margin: 3px 0; max-width: 90%; font-size: .88rem; }
+    .msg-in { background: #f3f4f6; margin-right: auto; }
+    .msg-out { background: #dbeafe; margin-left: auto; text-align: right; }
+    .msg-meta { font-size: .72rem; color: #888; margin-top: 2px; }
+    .alert { padding: 10px 14px; border-radius: 6px; margin-bottom: 1rem; }
+    .alert-success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+    .alert-error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    #unactioned-badge { display: none; }
+  </style>
+  {% block head %}{% endblock %}
+</head>
+<body>
+<nav>
+  <a class="brand" href="/dashboard/inbox">Hotel SLA</a>
+  <a href="/dashboard/inbox" {% if request.url.path == '/dashboard/inbox' %}class="active"{% endif %}>
+    Inbox
+    <span class="badge" id="nav-badge" style="display:none">!</span>
+  </a>
+  <a href="/dashboard/knowledge" {% if request.url.path == '/dashboard/knowledge' %}class="active"{% endif %}>Knowledge</a>
+  <a href="/dashboard/rooms" {% if request.url.path == '/dashboard/rooms' %}class="active"{% endif %}>Rooms</a>
+  <a href="/dashboard/stays" {% if request.url.path == '/dashboard/stays' %}class="active"{% endif %}>Stays</a>
+  <a href="/dashboard/analytics" {% if request.url.path == '/dashboard/analytics' %}class="active"{% endif %}>Analytics</a>
+  {% if user and user.is_manager %}
+  <a href="/dashboard/settings" {% if request.url.path == '/dashboard/settings' %}class="active"{% endif %}>Settings</a>
+  {% endif %}
+  <a href="/dashboard/push">Push</a>
+  <span class="spacer"></span>
+  {% if user %}
+  <span style="font-size:.8rem;color:#aaa">{{ user.role }} &bull; {{ user.staff_user_id[:8] }}</span>
+  <form action="/logout" method="post"><button type="submit">Logout</button></form>
+  {% endif %}
+</nav>
+<main>
+  {% block content %}{% endblock %}
+</main>
+<script>
+// SSE badge updater
+(function() {
+  if (!window.EventSource) return;
+  const badge = document.getElementById('nav-badge');
+  const es = new EventSource('/api/sse/inbox');
+  es.onmessage = function(e) {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.unactioned > 0) {
+        badge.textContent = d.unactioned;
+        badge.style.display = 'inline';
+        document.title = '(' + d.unactioned + ') Hotel SLA';
+      } else {
+        badge.style.display = 'none';
+        document.title = 'Hotel SLA';
+      }
+    } catch(_) {}
+  };
+})();
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
