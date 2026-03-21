@@ -109,7 +109,7 @@ def test_tenant_isolation_on_ack(client, agent_token, db):
     import uuid
     from app.models import Hotel, Conversation, Message
     from app.crypto import encrypt_str
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     # Create a second hotel
     other = Hotel(
@@ -131,7 +131,7 @@ def test_tenant_isolation_on_ack(client, agent_token, db):
         conversation_id=conv.id,
         direction="in",
         body="Hello from other hotel",
-        received_at=datetime.utcnow(),
+        received_at=datetime.now(timezone.utc),
         status="unactioned",
     )
     db.add(msg)

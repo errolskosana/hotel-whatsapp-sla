@@ -4,7 +4,7 @@ import json
 from typing import Any
 import httpx
 
-GRAPH_URL = "https://graph.facebook.com/v21.0"
+GRAPH_URL = "https://graph.facebook.com/v25.0"
 
 
 def verify_webhook_signature(app_secret: str, raw_body: bytes, x_hub_sig_256: str | None) -> bool:

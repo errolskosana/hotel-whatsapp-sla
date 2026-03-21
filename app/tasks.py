@@ -13,10 +13,15 @@ from app.logger import get_logger
 
 log = get_logger(__name__)
 
+def _celery_backend_url(url: str) -> str:
+    """Use Redis DB 1 for Celery results (separate from broker on DB 0)."""
+    import re
+    return re.sub(r"/\d+$", "/1", url) if re.search(r"/\d+$", url) else url + "/1"
+
 celery_app = Celery(
     "hotel_sla",
     broker=settings.redis_url,
-    backend=settings.redis_url.replace("/0", "/1") if settings.redis_url.endswith("/0") else settings.redis_url + "_results",
+    backend=_celery_backend_url(settings.redis_url),
 )
 
 celery_app.conf.beat_schedule = {
@@ -96,6 +101,7 @@ def scan_sla_and_escalate():
             subs = db.execute(
                 select(PushSubscription).where(PushSubscription.hotel_id == hotel.id)
             ).scalars().all()
+            push_succeeded = False
             for s in subs:
                 try:
                     send_push(
@@ -106,11 +112,16 @@ def scan_sla_and_escalate():
                         title="SLA Escalation",
                         body=f"Guest request not actioned within {hotel.sla_seconds}s.",
                     )
+                    push_succeeded = True
+                except Exception as exc:
+                    log.error("push_notify_failed", subscription_id=str(s.id), error=str(exc))
+            if push_succeeded:
+                try:
                     esc.push_notified_at = datetime.utcnow()
                     db.commit()
                 except Exception as exc:
                     db.rollback()
-                    log.error("push_notify_failed", subscription_id=str(s.id), error=str(exc))
+                    log.error("push_notified_at_save_failed", message_id=str(msg.id), error=str(exc))
 
     finally:
         db.close()

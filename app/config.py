@@ -40,3 +40,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+if settings.app_env == "prod" and settings.jwt_secret == "change-me-in-production":
+    raise RuntimeError("JWT_SECRET must be set to a strong secret in production (app_env=prod)")

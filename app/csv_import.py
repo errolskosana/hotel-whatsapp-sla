@@ -1,10 +1,11 @@
 import csv
+import uuid
 from datetime import datetime
 from sqlalchemy.orm import Session
 from app.models import GuestStay
 
 
-def import_guest_stays_csv(db: Session, hotel_id, file_obj) -> int:
+def import_guest_stays_csv(db: Session, hotel_id: uuid.UUID, file_obj) -> int:
     """
     CSV headers required:
       guest_name, arrival_date, departure_date, room_number

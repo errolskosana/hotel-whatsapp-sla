@@ -16,7 +16,8 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from slowapi import Limiter
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.config import settings
@@ -42,6 +43,7 @@ log = get_logger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
 app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -103,6 +105,7 @@ def login_submit(
         token,
         httponly=True,
         samesite="strict",
+        secure=settings.app_env != "dev",
         max_age=settings.jwt_expiry_hours * 3600,
     )
     log.info("login_success", user_id=str(user.id), role=user.role)
@@ -112,7 +115,7 @@ def login_submit(
 @app.post("/logout")
 def logout():
     response = RedirectResponse("/login", status_code=302)
-    response.delete_cookie("access_token")
+    response.delete_cookie("access_token", httponly=True, samesite="strict", secure=settings.app_env != "dev")
     return response
 
 
@@ -146,7 +149,8 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(db_session)):
         entry = payload["entry"][0]
         value = entry["changes"][0]["value"]
         phone_number_id = value["metadata"]["phone_number_id"]
-    except Exception:
+    except Exception as exc:
+        log.warning("webhook_parse_error", error=str(exc), payload=str(payload)[:200])
         return "OK"
 
     hotel = db.execute(
@@ -154,7 +158,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(db_session)):
     ).scalar_one_or_none()
     if not hotel:
         log.warning("unknown_phone_number_id", phone_number_id=phone_number_id)
-        raise HTTPException(status_code=404, detail="Unknown hotel phone_number_id")
+        return "OK"  # always ack to Meta; 4xx causes retries
 
     # Handle delivery status updates
     statuses = value.get("statuses") or []
@@ -284,8 +288,8 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(db_session)):
         retrieved = top_k_chunks(body, knowledge_chunks, k=3)
         if should_auto_answer(retrieved):
             answer = compose_grounded_answer(body, retrieved)
-            token = decrypt_str(hotel.whatsapp_access_token_enc)
             try:
+                token = decrypt_str(hotel.whatsapp_access_token_enc)
                 await send_whatsapp_text(
                     phone_number_id=hotel.whatsapp_phone_number_id,
                     access_token=token,
@@ -320,14 +324,16 @@ async def _inbox_event_stream(hotel_id: str) -> AsyncGenerator[str, None]:
         await asyncio.sleep(3)
         try:
             db = next(db_session())
-            count = db.execute(
-                select(func.count(Message.id)).where(
-                    Message.hotel_id == uuid.UUID(hotel_id),
-                    Message.status == "unactioned",
-                    Message.direction == "in",
-                )
-            ).scalar() or 0
-            db.close()
+            try:
+                count = db.execute(
+                    select(func.count(Message.id)).where(
+                        Message.hotel_id == uuid.UUID(hotel_id),
+                        Message.status == "unactioned",
+                        Message.direction == "in",
+                    )
+                ).scalar() or 0
+            finally:
+                db.close()
             if count != last_count:
                 last_count = count
                 yield f"data: {json.dumps({'unactioned': count})}\n\n"
@@ -578,7 +584,7 @@ def stays_import(
     db: Session = Depends(db_session),
 ):
     try:
-        count = import_guest_stays_csv(db, str(user.hotel_id), file.file)
+        count = import_guest_stays_csv(db, uuid.UUID(user.hotel_id), file.file)
         msg = f"Imported {count} stays successfully."
     except Exception as exc:
         msg = f"Import failed: {exc}"
@@ -786,7 +792,11 @@ async def reply_message(
     if conv.opted_out:
         raise HTTPException(status_code=400, detail="Guest has opted out")
 
-    token = decrypt_str(hotel.whatsapp_access_token_enc)
+    try:
+        token = decrypt_str(hotel.whatsapp_access_token_enc)
+    except Exception as exc:
+        log.error("token_decrypt_failed", hotel_id=str(hotel.id), error=str(exc))
+        raise HTTPException(status_code=500, detail="WhatsApp token unavailable")
     sent = await send_whatsapp_text(
         phone_number_id=hotel.whatsapp_phone_number_id,
         access_token=token,
@@ -881,5 +891,5 @@ def import_csv(
 ):
     if hotel_id != user.hotel_id:
         raise HTTPException(status_code=403, detail="Forbidden")
-    count = import_guest_stays_csv(db, hotel_id, file.file)
+    count = import_guest_stays_csv(db, uuid.UUID(hotel_id), file.file)
     return f"Imported {count} stays"
