@@ -1,47 +1,168 @@
 {% extends "base.html" %}
-{% block title %}Knowledge Base — Hotel SLA{% endblock %}
+{% block title %}AI Knowledge Base — Hotel SLA{% endblock %}
+{% block page_title %}AI Knowledge Base{% endblock %}
 
 {% block content %}
-<h1>Knowledge Base</h1>
-<p style="color:#555;margin-bottom:1.25rem;font-size:.9rem">
-  These entries are used by the AI to auto-answer guest questions. Add factual hotel information only.
-</p>
+{% set pdf_msg = request.query_params.get('pdf_msg') %}
+{% set pdf_err = request.query_params.get('pdf_err') %}
 
-<div class="card">
-  <h2>Add entry</h2>
-  <form method="post" action="/dashboard/knowledge">
-    <div class="form-row">
-      <label for="content">Content</label>
-      <textarea id="content" name="content" rows="3" placeholder="e.g. Room service is available 24/7. Call ext. 0 from your room."></textarea>
-    </div>
-    <button type="submit" class="btn btn-primary">Add</button>
-  </form>
+{% if pdf_msg %}
+<div class="alert alert-success alert-dismissible fade show d-flex align-items-center gap-2 mb-3" role="alert">
+  <i class="bi bi-file-earmark-check-fill"></i>
+  <span>Successfully extracted <strong>{{ pdf_msg }} chunks</strong> from PDF.</span>
+  <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+{% if pdf_err %}
+<div class="alert alert-danger alert-dismissible fade show d-flex align-items-center gap-2 mb-3" role="alert">
+  <i class="bi bi-exclamation-circle-fill"></i>
+  <span>PDF parsing failed. Please check the file and try again.</span>
+  <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
+<!-- Info banner -->
+<div class="alert alert-info d-flex align-items-start gap-3 mb-4 border-0" style="background:#eff6ff;color:#1e40af;border-left:4px solid #3b82f6 !important;border-radius:.65rem">
+  <i class="bi bi-robot mt-1" style="font-size:1.3rem;flex-shrink:0"></i>
+  <div>
+    <strong>How AI auto-replies work:</strong> When a guest sends a WhatsApp message, the AI searches these knowledge entries for a match.
+    If confidence is ≥ 62%, it replies automatically. Otherwise, it escalates to staff.
+    <strong>Upload your Guest Directory PDF</strong> to instantly populate knowledge from your hotel handbook.
+  </div>
 </div>
 
-<div class="card">
-  <h2>Entries ({{ chunks | length }})</h2>
-  {% if not chunks %}
-  <p style="color:#888">No entries yet. Add some hotel information above.</p>
-  {% else %}
-  <table>
-    <thead>
-      <tr><th>Content</th><th>Active</th><th>Added</th><th></th></tr>
-    </thead>
-    <tbody>
-      {% for c in chunks %}
-      <tr>
-        <td>{{ c.content }}</td>
-        <td>{{ "Yes" if c.is_active else "No" }}</td>
-        <td style="white-space:nowrap">{{ c.created_at.strftime('%d %b %Y') }}</td>
-        <td>
-          <form action="/dashboard/knowledge/{{ c.id }}/delete" method="post" onsubmit="return confirm('Delete this entry?')">
-            <button class="btn btn-danger btn-sm">Delete</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
+<!-- Tabs -->
+<ul class="nav nav-tabs mb-4" id="kbTabs" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="entries-tab" data-bs-toggle="tab" data-bs-target="#entries" type="button">
+      <i class="bi bi-list-ul me-2"></i>Knowledge Entries
+      <span class="badge bg-secondary ms-1">{{ chunks | length }}</span>
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="pdf-tab" data-bs-toggle="tab" data-bs-target="#pdf" type="button">
+      <i class="bi bi-file-earmark-pdf-fill me-2 text-danger"></i>Upload Guest Directory PDF
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="add-tab" data-bs-toggle="tab" data-bs-target="#addEntry" type="button">
+      <i class="bi bi-plus-circle me-2"></i>Add Entry
+    </button>
+  </li>
+</ul>
+
+<div class="tab-content">
+  <!-- ── Entries tab ── -->
+  <div class="tab-pane fade show active" id="entries">
+    <div class="data-card">
+      <div class="data-card-hdr">
+        <h6><i class="bi bi-lightbulb-fill me-2"></i>Hotel Knowledge Entries</h6>
+      </div>
+      {% if chunks %}
+      <div class="table-responsive">
+        <table class="table table-hover mb-0" style="font-size:.83rem">
+          <thead class="table-light">
+            <tr>
+              <th style="width:60%">Content</th>
+              <th>Active</th>
+              <th>Added</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in chunks %}
+            <tr>
+              <td style="max-width:400px;white-space:normal">{{ c.content }}</td>
+              <td>
+                {% if c.is_active %}
+                <span class="badge bg-success">Yes</span>
+                {% else %}
+                <span class="badge bg-secondary">No</span>
+                {% endif %}
+              </td>
+              <td class="text-nowrap text-secondary">{{ c.created_at.strftime('%d %b %Y') }}</td>
+              <td>
+                <form method="post" action="/dashboard/knowledge/{{ c.id }}/delete" onsubmit="return confirm('Delete this entry?')">
+                  <button class="btn btn-sm btn-outline-danger py-0 px-2"><i class="bi bi-trash3"></i></button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="text-center py-5 text-secondary">
+        <i class="bi bi-lightbulb" style="font-size:2.5rem;opacity:.35"></i>
+        <p class="mt-2 mb-1">No knowledge entries yet.</p>
+        <p class="mb-0" style="font-size:.85rem">Upload a PDF or add entries manually.</p>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ── PDF upload tab ── -->
+  <div class="tab-pane fade" id="pdf">
+    <div class="data-card">
+      <div class="data-card-hdr">
+        <h6><i class="bi bi-file-earmark-pdf-fill text-danger me-2"></i>Upload Guest Directory / Hotel Handbook (PDF)</h6>
+      </div>
+      <div class="p-4">
+        <div class="row g-4">
+          <div class="col-lg-6">
+            <form method="post" action="/dashboard/knowledge/pdf" enctype="multipart/form-data">
+              <div class="mb-3">
+                <label class="form-label fw-semibold">Select PDF File</label>
+                <input type="file" name="file" class="form-control" accept=".pdf" required/>
+                <div class="form-text">Max recommended size: 10 MB. Extracts all text automatically.</div>
+              </div>
+              <button type="submit" class="btn btn-danger">
+                <i class="bi bi-cloud-upload-fill me-2"></i>Upload &amp; Extract
+              </button>
+            </form>
+          </div>
+          <div class="col-lg-6">
+            <div class="alert border-0 h-100 mb-0" style="background:#fef9ee;border-left:4px solid #f59e0b !important;border-radius:.65rem">
+              <h6 class="fw-bold mb-2"><i class="bi bi-info-circle-fill text-warning me-2"></i>What gets extracted?</h6>
+              <ul class="mb-0" style="font-size:.83rem;padding-left:1.2rem">
+                <li>Each paragraph in the PDF becomes a knowledge chunk</li>
+                <li>Very short lines (page numbers, headers) are filtered out</li>
+                <li>Up to 200 chunks per upload</li>
+                <li>Chunks are immediately available for AI auto-replies</li>
+              </ul>
+              <hr class="my-2"/>
+              <p class="mb-0" style="font-size:.8rem;color:#92400e">
+                <strong>Tip:</strong> Works best with structured PDFs like guest directories, service menus, and hotel policies.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Add entry tab ── -->
+  <div class="tab-pane fade" id="addEntry">
+    <div class="data-card">
+      <div class="data-card-hdr">
+        <h6><i class="bi bi-plus-circle-fill me-2"></i>Add Knowledge Entry Manually</h6>
+      </div>
+      <div class="p-4">
+        <form method="post" action="/dashboard/knowledge" class="row g-3">
+          <div class="col-12">
+            <label class="form-label fw-semibold">Knowledge Content</label>
+            <textarea name="content" class="form-control" rows="4"
+              placeholder="e.g. Breakfast is served from 07:00 to 10:30 in the main restaurant on the ground floor." required></textarea>
+            <div class="form-text">Write complete, factual sentences. Each entry should answer one specific guest question.</div>
+          </div>
+          <div class="col-12">
+            <button type="submit" class="btn btn-primary">
+              <i class="bi bi-plus-lg me-2"></i>Add Entry
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}

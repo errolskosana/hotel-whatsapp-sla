@@ -17,6 +17,9 @@ os.environ["VAPID_SUBJECT"] = "mailto:test@test.com"
 os.environ["VAPID_PUBLIC_KEY"] = "test-pub-key"
 os.environ["VAPID_PRIVATE_KEY"] = "test-priv-key"
 os.environ["JWT_SECRET"] = "test-jwt-secret-at-least-32-chars!!"
+# Disable multi-tenant control plane in tests (single-tenant SQLite mode)
+os.environ.pop("CONTROL_PLANE_DB_URL", None)
+os.environ["CONTROL_PLANE_DB_URL"] = ""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -43,6 +46,7 @@ from app.auth import hash_password, create_access_token
 from app.crypto import encrypt_str
 from app.main import app
 from app.db import db_session
+from app.tenant_db import get_tenant_session
 
 # Create schema once
 Base.metadata.create_all(_TEST_ENGINE)
@@ -134,6 +138,7 @@ def client(db):
         yield db
 
     app.dependency_overrides[db_session] = _override_db
+    app.dependency_overrides[get_tenant_session] = _override_db
     with TestClient(app, raise_server_exceptions=True) as c:
         yield c
     app.dependency_overrides.clear()

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(venv/Scripts/python -m alembic upgrade head)",
+      "Bash(powershell \"& ''C:\\\\Program Files\\\\PostgreSQL\\\\16\\\\bin\\\\psql.exe'' -U postgres -p 5432 -c ''\\\\l'' 2>&1\")",
+      "Bash(powershell \"& ''C:\\\\Program Files\\\\PostgreSQL\\\\17\\\\bin\\\\psql.exe'' -U postgres -p 5432 -c ''\\\\l'' 2>&1\")",
+      "Bash(powershell \"Get-ChildItem 'C:\\\\Program Files\\\\PostgreSQL\\\\' -ErrorAction SilentlyContinue | Select-Object Name\")",
+      "Bash(\"C:\\\\Program Files\\\\PostgreSQL\\\\17\\\\bin\\\\psql.exe\" -U postgres -p 5432 -c \"\\\\l\")",
+      "Bash(PGPASSWORD=4366 \"C:\\\\Program Files\\\\PostgreSQL\\\\17\\\\bin\\\\psql.exe\" -U postgres -p 5432 -c \"\\\\l\" 2>&1)",
+      "Bash(PGPASSWORD=4366 \"C:\\\\Program Files\\\\PostgreSQL\\\\17\\\\bin\\\\psql.exe\" -U postgres -p 5432 -c \"CREATE DATABASE hotel;\" 2>&1)",
+      "Bash(venv/Scripts/python -c \":*)"
+    ]
+  }
+}

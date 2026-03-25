@@ -4,110 +4,234 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>{% block title %}Hotel SLA{% endblock %}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #222; }
-    nav {
-      background: #1a1a2e; color: #fff; padding: 0 1.5rem;
-      display: flex; align-items: center; gap: 1.5rem; height: 52px;
+    :root {
+      --sb-w: 252px;
+      --sb-bg: {% if user and user.brand_color_sidebar %}{{ user.brand_color_sidebar }}{% else %}#0f2340{% endif %};
+      --sb-border: color-mix(in srgb, var(--sb-bg) 70%, white 30%);
+      --sb-text: #8fafc8;
+      --sb-hover: color-mix(in srgb, var(--sb-bg) 75%, white 25%);
+      --sb-active: {% if user and user.brand_color_primary %}{{ user.brand_color_primary }}{% else %}#1d4ed8{% endif %};
+      --top-h: 58px;
     }
-    nav .brand { font-weight: 700; font-size: 1.1rem; color: #7eb8ff; text-decoration: none; }
-    nav a { color: #ccc; text-decoration: none; font-size: .9rem; }
-    nav a:hover, nav a.active { color: #fff; }
-    nav .spacer { flex: 1; }
-    nav .badge {
-      background: #e53e3e; color: #fff; font-size: .75rem;
-      border-radius: 9px; padding: 2px 7px; margin-left: 4px; vertical-align: middle;
+    body { background:#f0f4f8; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+    /* ── Sidebar ── */
+    .sidebar {
+      width: var(--sb-w); min-height:100vh; background:var(--sb-bg);
+      position:fixed; top:0; left:0; z-index:1000;
+      display:flex; flex-direction:column; transition:transform .25s;
     }
-    nav form { display: inline; }
-    nav button {
-      background: none; border: 1px solid #555; color: #ccc; cursor: pointer;
-      padding: 4px 10px; border-radius: 4px; font-size: .85rem;
+    .sb-brand {
+      padding:1.25rem 1rem .9rem; border-bottom:1px solid var(--sb-border);
     }
-    nav button:hover { border-color: #aaa; color: #fff; }
-    main { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
-    h1 { font-size: 1.4rem; margin-bottom: 1rem; }
-    h2 { font-size: 1.15rem; margin-bottom: .75rem; }
-    .card { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.1); padding: 1.25rem; margin-bottom: 1rem; }
-    .btn { display: inline-block; padding: 6px 14px; border-radius: 5px; border: none; cursor: pointer; font-size: .88rem; }
-    .btn-primary { background: #2563eb; color: #fff; }
-    .btn-primary:hover { background: #1d4ed8; }
-    .btn-danger { background: #dc2626; color: #fff; }
-    .btn-danger:hover { background: #b91c1c; }
-    .btn-sm { padding: 3px 9px; font-size: .8rem; }
-    input[type=text], input[type=email], input[type=password], input[type=number],
-    select, textarea {
-      border: 1px solid #d1d5db; border-radius: 5px; padding: 6px 10px;
-      font-size: .9rem; width: 100%;
+    .sb-brand .brand-name { color:#fff; font-size:1.05rem; font-weight:700; line-height:1.2; }
+    .sb-brand .brand-sub  { color:#5a7fa0; font-size:.72rem; }
+    .sb-nav { list-style:none; padding:.6rem 0; margin:0; flex:1; overflow-y:auto; }
+    .sb-nav li { padding:.15rem .65rem; }
+    .sb-section { padding:.6rem 1.25rem .2rem; font-size:.68rem; font-weight:700;
+      color:#3a6080; text-transform:uppercase; letter-spacing:.07em; }
+    .sb-link {
+      display:flex; align-items:center; gap:.6rem; padding:.58rem .85rem;
+      color:var(--sb-text); text-decoration:none; border-radius:.45rem;
+      font-size:.855rem; font-weight:500; transition:background .13s,color .13s;
     }
-    input:focus, select:focus, textarea:focus { outline: 2px solid #2563eb; border-color: #2563eb; }
-    label { font-size: .85rem; font-weight: 600; display: block; margin-bottom: 3px; }
-    .form-row { margin-bottom: .75rem; }
-    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
-    th { text-align: left; padding: 8px 10px; background: #f0f0f0; border-bottom: 2px solid #ddd; }
-    td { padding: 7px 10px; border-bottom: 1px solid #eee; vertical-align: top; }
-    tr:hover td { background: #fafafa; }
-    .badge-status { display: inline-block; padding: 2px 8px; border-radius: 9px; font-size: .78rem; font-weight: 600; }
-    .badge-unactioned { background: #fee2e2; color: #991b1b; }
-    .badge-acknowledged { background: #fef3c7; color: #92400e; }
-    .badge-replied { background: #d1fae5; color: #065f46; }
-    .badge-auto_replied { background: #dbeafe; color: #1e40af; }
-    .badge-escalated { background: #fde8d8; color: #9a3412; }
-    .msg-bubble { padding: 6px 10px; border-radius: 8px; margin: 3px 0; max-width: 90%; font-size: .88rem; }
-    .msg-in { background: #f3f4f6; margin-right: auto; }
-    .msg-out { background: #dbeafe; margin-left: auto; text-align: right; }
-    .msg-meta { font-size: .72rem; color: #888; margin-top: 2px; }
-    .alert { padding: 10px 14px; border-radius: 6px; margin-bottom: 1rem; }
-    .alert-success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
-    .alert-error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
-    #unactioned-badge { display: none; }
+    .sb-link i { font-size:.95rem; min-width:1.15rem; }
+    .sb-link:hover { background:var(--sb-hover); color:#d4e6f5; }
+    .sb-link.active { background:var(--sb-active); color:#fff; }
+    .sb-divider { border-top:1px solid var(--sb-border); margin:.4rem .65rem; }
+    .sb-footer {
+      padding:.85rem .75rem; border-top:1px solid var(--sb-border);
+    }
+    .sb-user { display:flex; align-items:center; gap:.65rem; margin-bottom:.65rem; }
+    .sb-avatar {
+      width:34px; height:34px; border-radius:50%; background:#1d4ed8;
+      color:#fff; display:flex; align-items:center; justify-content:center;
+      font-size:.75rem; font-weight:700; flex-shrink:0;
+    }
+    .sb-email { color:#b0cce0; font-size:.75rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:165px; }
+    .sb-role  { font-size:.65rem; }
+    /* ── Main ── */
+    .main-wrap { margin-left:var(--sb-w); display:flex; flex-direction:column; min-height:100vh; }
+    .topbar {
+      height:var(--top-h); background:#fff; border-bottom:1px solid #e2e8f0;
+      padding:0 1.75rem; display:flex; align-items:center; gap:1rem;
+      position:sticky; top:0; z-index:100;
+    }
+    .topbar-title { font-size:1.1rem; font-weight:700; color:#0f2340; margin:0; }
+    .content { padding:1.6rem 1.75rem; flex:1; }
+    /* ── Cards ── */
+    .stat-card {
+      background:#fff; border-radius:.75rem; border:1px solid #e2e8f0;
+      padding:1.4rem; height:100%;
+    }
+    .stat-icon {
+      width:44px; height:44px; border-radius:.6rem;
+      display:flex; align-items:center; justify-content:center;
+      font-size:1.25rem; margin-bottom:.85rem;
+    }
+    .stat-val  { font-size:2rem; font-weight:800; color:#0f2340; line-height:1; }
+    .stat-lbl  { color:#64748b; font-size:.78rem; font-weight:500; margin-top:.25rem; }
+    .data-card { background:#fff; border-radius:.75rem; border:1px solid #e2e8f0; overflow:hidden; }
+    .data-card-hdr {
+      padding:1rem 1.4rem; border-bottom:1px solid #f1f5f9;
+      display:flex; align-items:center; justify-content:space-between;
+    }
+    .data-card-hdr h6 { margin:0; font-weight:700; color:#0f2340; font-size:.92rem; }
+    /* ── Status badges ── */
+    .bs-unactioned  { background:#fee2e2; color:#dc2626; }
+    .bs-acknowledged{ background:#fef3c7; color:#b45309; }
+    .bs-replied     { background:#d1fae5; color:#059669; }
+    .bs-auto_replied{ background:#dbeafe; color:#1d4ed8; }
+    .bs-escalated   { background:#ffe4d6; color:#c2410c; }
+    /* ── Messages ── */
+    .msg-in  { background:#f1f5f9; border-radius:.45rem .45rem .45rem 0; padding:.55rem .85rem; max-width:88%; }
+    .msg-out { background:#dbeafe; border-radius:.45rem .45rem 0 .45rem; padding:.55rem .85rem; max-width:88%; margin-left:auto; }
+    .msg-time { font-size:.68rem; color:#94a3b8; margin-top:.2rem; }
+    /* ── Conv card ── */
+    .conv-card { background:#fff; border-radius:.75rem; border:1px solid #e2e8f0; margin-bottom:1rem; }
+    .conv-hdr  { padding:.9rem 1.2rem; border-bottom:1px solid #f1f5f9; display:flex; align-items:center; gap:.75rem; }
+    .wa-avatar {
+      width:40px; height:40px; border-radius:50%;
+      background:linear-gradient(135deg,#25d366,#128c7e);
+      color:#fff; display:flex; align-items:center; justify-content:center;
+      font-weight:700; font-size:.85rem; flex-shrink:0;
+    }
+    .msg-thread { padding:.9rem 1.2rem; max-height:280px; overflow-y:auto; background:#fafbfc; }
+    .conv-actions { padding:.75rem 1.2rem; border-top:1px solid #f1f5f9; background:#f8fafc; }
+    /* ── Responsive ── */
+    @media(max-width:768px){
+      .sidebar { transform:translateX(-100%); }
+      .sidebar.open { transform:translateX(0); }
+      .main-wrap { margin-left:0; }
+    }
   </style>
   {% block head %}{% endblock %}
 </head>
 <body>
-<nav>
-  <a class="brand" href="/dashboard/inbox">Hotel SLA</a>
-  <a href="/dashboard/inbox" {% if request.url.path == '/dashboard/inbox' %}class="active"{% endif %}>
-    Inbox
-    <span class="badge" id="nav-badge" style="display:none">!</span>
-  </a>
-  <a href="/dashboard/knowledge" {% if request.url.path == '/dashboard/knowledge' %}class="active"{% endif %}>Knowledge</a>
-  <a href="/dashboard/rooms" {% if request.url.path == '/dashboard/rooms' %}class="active"{% endif %}>Rooms</a>
-  <a href="/dashboard/stays" {% if request.url.path == '/dashboard/stays' %}class="active"{% endif %}>Stays</a>
-  <a href="/dashboard/analytics" {% if request.url.path == '/dashboard/analytics' %}class="active"{% endif %}>Analytics</a>
-  {% if user and user.is_manager %}
-  <a href="/dashboard/settings" {% if request.url.path == '/dashboard/settings' %}class="active"{% endif %}>Settings</a>
-  {% endif %}
-  <a href="/dashboard/push">Push</a>
-  <span class="spacer"></span>
-  {% if user %}
-  <span style="font-size:.8rem;color:#aaa">{{ user.role }} &bull; {{ user.staff_user_id[:8] }}</span>
-  <form action="/logout" method="post"><button type="submit">Logout</button></form>
-  {% endif %}
-</nav>
-<main>
-  {% block content %}{% endblock %}
-</main>
+<div class="d-flex">
+
+  <!-- ─── Sidebar ─── -->
+  <nav class="sidebar" id="sidebar">
+    <div class="sb-brand">
+      <div class="d-flex align-items-center gap-2 mb-1">
+        {% if user and user.brand_logo_url %}
+        <img src="{{ user.brand_logo_url }}" alt="logo" style="height:28px;object-fit:contain;border-radius:4px"/>
+        {% else %}
+        <i class="bi bi-building-fill text-warning" style="font-size:1.3rem"></i>
+        {% endif %}
+        <span class="brand-name">{{ user.brand_name if user and user.brand_name else 'Hotel SLA' }}</span>
+      </div>
+      <span class="brand-sub">{{ user.brand_tagline if user and user.brand_tagline else 'Front Desk &amp; Management' }}</span>
+    </div>
+
+    <ul class="sb-nav">
+      <li>
+        <a href="/dashboard/inbox" class="sb-link {% if '/inbox' in request.url.path %}active{% endif %}">
+          <i class="bi bi-chat-dots-fill"></i> Inbox
+          <span class="badge rounded-pill ms-auto d-none" id="nav-badge" style="background:#ef4444;font-size:.68rem">0</span>
+        </a>
+      </li>
+      <li>
+        <a href="/dashboard/analytics" class="sb-link {% if '/analytics' in request.url.path %}active{% endif %}">
+          <i class="bi bi-bar-chart-line-fill"></i> Reports &amp; Analytics
+        </a>
+      </li>
+      <li class="sb-divider"></li>
+      <li class="sb-section">Guest Services</li>
+      <li>
+        <a href="/dashboard/knowledge" class="sb-link {% if '/knowledge' in request.url.path %}active{% endif %}">
+          <i class="bi bi-lightbulb-fill"></i> AI Knowledge Base
+        </a>
+      </li>
+      <li>
+        <a href="/dashboard/rooms" class="sb-link {% if '/rooms' in request.url.path %}active{% endif %}">
+          <i class="bi bi-door-open-fill"></i> Rooms
+        </a>
+      </li>
+      <li>
+        <a href="/dashboard/stays" class="sb-link {% if '/stays' in request.url.path %}active{% endif %}">
+          <i class="bi bi-people-fill"></i> Guest Stays
+        </a>
+      </li>
+      <li>
+        <a href="/dashboard/push" class="sb-link {% if '/push' in request.url.path %}active{% endif %}">
+          <i class="bi bi-bell-fill"></i> Push Alerts
+        </a>
+      </li>
+      {% if user and user.is_manager %}
+      <li class="sb-divider"></li>
+      <li class="sb-section">Management</li>
+      <li>
+        <a href="/dashboard/settings" class="sb-link {% if '/settings' in request.url.path %}active{% endif %}">
+          <i class="bi bi-gear-fill"></i> Settings
+        </a>
+      </li>
+      {% endif %}
+    </ul>
+
+    <div class="sb-footer">
+      {% if user %}
+      <div class="sb-user">
+        <div class="sb-avatar">{{ (user.email[:2] if user.email else user.role[:2]).upper() }}</div>
+        <div>
+          <div class="sb-email">{{ user.email or 'Staff User' }}</div>
+          <span class="badge sb-role {% if user.is_manager %}bg-warning text-dark{% else %}bg-primary{% endif %}">
+            {{ 'Manager' if user.is_manager else 'Front Office' }}
+          </span>
+        </div>
+      </div>
+      <form action="/logout" method="post">
+        <button class="btn btn-sm w-100" style="background:#1a3a60;color:#8fafc8;border:0">
+          <i class="bi bi-box-arrow-right me-1"></i>Sign Out
+        </button>
+      </form>
+      {% endif %}
+    </div>
+  </nav>
+
+  <!-- ─── Main ─── -->
+  <div class="main-wrap w-100">
+    <div class="topbar">
+      <button class="btn btn-link d-md-none p-0 me-1" id="sbToggle" style="color:#0f2340">
+        <i class="bi bi-list fs-4"></i>
+      </button>
+      <h1 class="topbar-title">{% block page_title %}Dashboard{% endblock %}</h1>
+      <div class="ms-auto d-flex align-items-center gap-2">
+        <span class="badge bg-light text-secondary border" style="font-family:monospace;font-size:.7rem">
+          <i class="bi bi-building me-1"></i>{{ user.hotel_id[:8] if user else '' }}…
+        </span>
+      </div>
+    </div>
+
+    <div class="content">
+      {% if msg %}<div class="alert alert-success alert-dismissible fade show d-flex align-items-center mb-3" role="alert">
+        <i class="bi bi-check-circle-fill me-2"></i>{{ msg }}
+        <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert"></button>
+      </div>{% endif %}
+      {% block content %}{% endblock %}
+    </div>
+  </div>
+</div>
+
+<div id="sbOverlay" class="d-none" style="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-// SSE badge updater
-(function() {
-  if (!window.EventSource) return;
-  const badge = document.getElementById('nav-badge');
-  const es = new EventSource('/api/sse/inbox');
-  es.onmessage = function(e) {
-    try {
-      const d = JSON.parse(e.data);
-      if (d.unactioned > 0) {
-        badge.textContent = d.unactioned;
-        badge.style.display = 'inline';
-        document.title = '(' + d.unactioned + ') Hotel SLA';
-      } else {
-        badge.style.display = 'none';
-        document.title = 'Hotel SLA';
-      }
-    } catch(_) {}
+  // SSE badge
+  const sse = new EventSource("/api/sse/inbox");
+  sse.onmessage = e => {
+    const d = JSON.parse(e.data), b = document.getElementById("nav-badge");
+    if (b) { b.textContent = d.unactioned; b.classList.toggle("d-none", d.unactioned === 0); }
+    document.title = d.unactioned > 0 ? `(${d.unactioned}) Hotel SLA` : "Hotel SLA";
   };
-})();
+  // Mobile sidebar
+  const sb = document.getElementById("sidebar"), ov = document.getElementById("sbOverlay");
+  document.getElementById("sbToggle")?.addEventListener("click", () => {
+    sb.classList.toggle("open"); ov.classList.toggle("d-none");
+  });
+  ov.addEventListener("click", () => { sb.classList.remove("open"); ov.classList.add("d-none"); });
 </script>
 {% block scripts %}{% endblock %}
 </body>

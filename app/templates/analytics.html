@@ -1,63 +1,186 @@
 {% extends "base.html" %}
-{% block title %}Analytics — Hotel SLA{% endblock %}
+{% block title %}Reports — Hotel SLA{% endblock %}
+{% block page_title %}Reports &amp; Analytics{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+{% endblock %}
 
 {% block content %}
-<h1>Analytics <span style="font-size:.85rem;font-weight:400;color:#888">Last 7 days</span></h1>
+<!-- Period selector -->
+<div class="d-flex align-items-center gap-2 mb-4">
+  <span class="text-secondary" style="font-size:.85rem;font-weight:600">Period:</span>
+  <a href="?days=7"  class="btn btn-sm {% if days==7  %}btn-primary{% else %}btn-outline-secondary{% endif %}">Last 7 days</a>
+  <a href="?days=30" class="btn btn-sm {% if days==30 %}btn-primary{% else %}btn-outline-secondary{% endif %}">Last 30 days</a>
+</div>
 
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:1.5rem">
-  <div class="card" style="text-align:center">
-    <div style="font-size:2.2rem;font-weight:700;color:#2563eb">{{ total_in }}</div>
-    <div style="font-size:.85rem;color:#555">Inbound messages</div>
-  </div>
-  <div class="card" style="text-align:center">
-    <div style="font-size:2.2rem;font-weight:700;color:#16a34a">{{ total_replied }}</div>
-    <div style="font-size:.85rem;color:#555">Replied</div>
-  </div>
-  <div class="card" style="text-align:center">
-    <div style="font-size:2.2rem;font-weight:700;color:#dc2626">{{ total_escalated }}</div>
-    <div style="font-size:.85rem;color:#555">SLA breaches</div>
-  </div>
-  <div class="card" style="text-align:center">
-    <div style="font-size:2.2rem;font-weight:700;color:{{ '#dc2626' if breach_rate > 10 else '#d97706' if breach_rate > 0 else '#16a34a' }}">
-      {{ breach_rate }}%
+<!-- KPI Cards -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-lg-3">
+    <div class="stat-card">
+      <div class="stat-icon" style="background:#dbeafe;color:#1d4ed8"><i class="bi bi-chat-dots-fill"></i></div>
+      <div class="stat-val">{{ total_in }}</div>
+      <div class="stat-lbl">Inbound Messages</div>
     </div>
-    <div style="font-size:.85rem;color:#555">Breach rate</div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="stat-card">
+      <div class="stat-icon" style="background:#d1fae5;color:#059669"><i class="bi bi-check-circle-fill"></i></div>
+      <div class="stat-val">{{ total_replied }}</div>
+      <div class="stat-lbl">Replied (incl. AI)</div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="stat-card">
+      <div class="stat-icon" style="background:#ffe4d6;color:#c2410c"><i class="bi bi-exclamation-triangle-fill"></i></div>
+      <div class="stat-val">{{ total_escalated }}</div>
+      <div class="stat-lbl">SLA Breaches</div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="stat-card">
+      <div class="stat-icon" style="{% if breach_rate > 10 %}background:#fee2e2;color:#dc2626{% elif breach_rate > 0 %}background:#fef3c7;color:#b45309{% else %}background:#d1fae5;color:#059669{% endif %}">
+        <i class="bi bi-speedometer2"></i>
+      </div>
+      <div class="stat-val" style="{% if breach_rate > 10 %}color:#dc2626{% elif breach_rate > 0 %}color:#b45309{% else %}color:#059669{% endif %}">
+        {{ breach_rate }}%
+      </div>
+      <div class="stat-lbl">SLA Breach Rate</div>
+    </div>
   </div>
 </div>
 
-<div class="card">
-  <h2>SLA Configuration</h2>
-  {% if hotel %}
-  <p style="font-size:.9rem;color:#444;margin-bottom:.5rem">
-    Current SLA threshold: <strong>{{ hotel.sla_seconds }} seconds</strong>
-    {% if user.is_manager %}
-    &nbsp;&mdash;&nbsp; <a href="/dashboard/settings">Change in Settings</a>
-    {% endif %}
-  </p>
-  {% endif %}
+<!-- Second row: AI auto-replies -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-lg-3">
+    <div class="stat-card">
+      <div class="stat-icon" style="background:#ede9fe;color:#7c3aed"><i class="bi bi-robot"></i></div>
+      <div class="stat-val">{{ total_auto_replied }}</div>
+      <div class="stat-lbl">AI Auto-Replies</div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="stat-card">
+      <div class="stat-icon" style="background:#fef3c7;color:#b45309"><i class="bi bi-person-check-fill"></i></div>
+      <div class="stat-val">{{ total_replied - total_auto_replied }}</div>
+      <div class="stat-lbl">Staff Replies</div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="stat-card">
+      <div class="stat-icon" style="background:#f0fdf4;color:#16a34a"><i class="bi bi-percent"></i></div>
+      <div class="stat-val">{{ ((total_auto_replied / total_replied * 100) | round(1)) if total_replied else 0 }}%</div>
+      <div class="stat-lbl">AI Resolution Rate</div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="stat-card">
+      <div class="stat-icon" style="background:#f0f4f8;color:#1e3a5f"><i class="bi bi-shield-check-fill"></i></div>
+      <div class="stat-val">{{ (100 - breach_rate) }}%</div>
+      <div class="stat-lbl">SLA Compliance</div>
+    </div>
+  </div>
 </div>
 
-<div class="card">
-  <h2>Recent escalations</h2>
-  {% if not escalations %}
-  <p style="color:#888">No escalations in this period.</p>
+<!-- Charts -->
+<div class="row g-3 mb-4">
+  <div class="col-lg-8">
+    <div class="data-card h-100">
+      <div class="data-card-hdr">
+        <h6><i class="bi bi-graph-up me-2"></i>Messages per Day</h6>
+      </div>
+      <div class="p-3">
+        <canvas id="msgChart" height="100"></canvas>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="data-card h-100">
+      <div class="data-card-hdr">
+        <h6><i class="bi bi-pie-chart-fill me-2"></i>Resolution Breakdown</h6>
+      </div>
+      <div class="p-3 d-flex justify-content-center">
+        <canvas id="pieChart" style="max-height:220px"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Escalation history -->
+<div class="data-card">
+  <div class="data-card-hdr">
+    <h6><i class="bi bi-clock-history me-2"></i>Recent SLA Breaches</h6>
+    <span class="badge bg-light text-secondary border">{{ escalations | length }} records</span>
+  </div>
+  {% if escalations %}
+  <div class="table-responsive">
+    <table class="table table-hover mb-0" style="font-size:.83rem">
+      <thead class="table-light">
+        <tr>
+          <th>Triggered</th>
+          <th>Status</th>
+          <th>WhatsApp Notified</th>
+          <th>Push Notified</th>
+          <th>Resolved</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in escalations %}
+        <tr>
+          <td>{{ e.triggered_at.strftime('%d %b %Y, %H:%M') }}</td>
+          <td>
+            <span class="badge {% if e.status=='resolved' %}bg-success{% elif e.status=='triggered' %}bg-warning text-dark{% else %}bg-secondary{% endif %}">
+              {{ e.status }}
+            </span>
+          </td>
+          <td>{% if e.whatsapp_notified_at %}<i class="bi bi-check-circle-fill text-success"></i> {{ e.whatsapp_notified_at.strftime('%H:%M') }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          <td>{% if e.push_notified_at %}<i class="bi bi-check-circle-fill text-success"></i> {{ e.push_notified_at.strftime('%H:%M') }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          <td>{% if e.resolved_at %}<i class="bi bi-check-circle-fill text-success"></i> {{ e.resolved_at.strftime('%H:%M') }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
   {% else %}
-  <table>
-    <thead>
-      <tr><th>Triggered</th><th>Status</th><th>WhatsApp notified</th><th>Push notified</th><th>Resolved</th></tr>
-    </thead>
-    <tbody>
-      {% for e in escalations %}
-      <tr>
-        <td>{{ e.triggered_at.strftime('%d %b %H:%M') }}</td>
-        <td><span class="badge-status badge-{{ e.status }}">{{ e.status }}</span></td>
-        <td>{{ e.whatsapp_notified_at.strftime('%H:%M:%S') if e.whatsapp_notified_at else '—' }}</td>
-        <td>{{ e.push_notified_at.strftime('%H:%M:%S') if e.push_notified_at else '—' }}</td>
-        <td>{{ e.resolved_at.strftime('%d %b %H:%M') if e.resolved_at else '—' }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="text-center py-5 text-secondary">
+    <i class="bi bi-shield-check" style="font-size:2.5rem;opacity:.35"></i>
+    <p class="mt-2 mb-0">No SLA breaches in this period.</p>
+  </div>
   {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const labels = {{ daily_labels | safe }};
+const msgs   = {{ daily_msgs   | safe }};
+const esc    = {{ daily_esc    | safe }};
+const rep    = {{ daily_rep    | safe }};
+
+new Chart(document.getElementById("msgChart"), {
+  type: "line",
+  data: {
+    labels,
+    datasets: [
+      { label:"Inbound", data:msgs, borderColor:"#1d4ed8", backgroundColor:"rgba(29,78,216,.1)", tension:.35, fill:true, pointRadius:3 },
+      { label:"Replied",  data:rep,  borderColor:"#059669", backgroundColor:"rgba(5,150,105,.08)", tension:.35, fill:true, pointRadius:3 },
+      { label:"Escalated",data:esc,  borderColor:"#dc2626", backgroundColor:"rgba(220,38,38,.08)", tension:.35, fill:true, pointRadius:3 },
+    ]
+  },
+  options: { responsive:true, plugins:{ legend:{ position:"top" } }, scales:{ y:{ beginAtZero:true, ticks:{ stepSize:1 } } } }
+});
+
+new Chart(document.getElementById("pieChart"), {
+  type: "doughnut",
+  data: {
+    labels: ["AI Auto-Replied","Staff Replied","Escalated","Pending"],
+    datasets:[{
+      data: [{{ total_auto_replied }}, {{ total_replied - total_auto_replied }}, {{ total_escalated }}, {{ total_in - total_replied }}],
+      backgroundColor:["#1d4ed8","#059669","#dc2626","#94a3b8"],
+      borderWidth:0,
+    }]
+  },
+  options: { responsive:true, plugins:{ legend:{ position:"bottom", labels:{ font:{ size:11 } } } }, cutout:"65%" }
+});
+</script>
 {% endblock %}

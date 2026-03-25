@@ -1,0 +1,55 @@
+{% extends "admin/base.html" %}
+{% block title %}Admins — Super Admin{% endblock %}
+{% block page_title %}Super Admins{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+  <div class="col-lg-5">
+    <div class="data-card">
+      <div class="data-card-hdr"><h6><i class="bi bi-person-plus-fill me-2"></i>Add Admin</h6></div>
+      <div class="p-4">
+        <form method="post" action="/admin/admins/add">
+          <div class="mb-3">
+            <label class="form-label fw-semibold" style="font-size:.83rem">Email</label>
+            <input type="email" name="email" class="form-control" placeholder="admin@company.com" required/>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold" style="font-size:.83rem">Password</label>
+            <input type="password" name="password" class="form-control" placeholder="••••••••" required/>
+          </div>
+          <button type="submit" class="btn btn-primary w-100">
+            <i class="bi bi-person-plus me-2"></i>Add Admin
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-7">
+    <div class="data-card">
+      <div class="data-card-hdr">
+        <h6><i class="bi bi-people-fill me-2"></i>All Admins</h6>
+        <span class="badge bg-light text-secondary border">{{ admins | length }}</span>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover mb-0" style="font-size:.85rem">
+          <thead class="table-light">
+            <tr><th>Email</th><th>Status</th><th>Created</th></tr>
+          </thead>
+          <tbody>
+            {% for a in admins %}
+            <tr>
+              <td class="fw-semibold">{{ a.email }}</td>
+              <td>
+                {% if a.is_active %}<span class="badge bg-success">Active</span>
+                {% else %}<span class="badge bg-secondary">Inactive</span>{% endif %}
+              </td>
+              <td class="text-secondary">{{ a.created_at.strftime('%d %b %Y') }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

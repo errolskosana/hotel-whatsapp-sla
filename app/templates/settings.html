@@ -1,80 +1,214 @@
 {% extends "base.html" %}
 {% block title %}Settings — Hotel SLA{% endblock %}
+{% block page_title %}Settings{% endblock %}
 
 {% block content %}
-<h1>Settings</h1>
-
 {% if msg %}
-<div class="alert alert-success">{{ msg }}</div>
+<div class="alert alert-success alert-dismissible fade show d-flex align-items-center gap-2 mb-3" role="alert">
+  <i class="bi bi-check-circle-fill"></i>{{ msg }}
+  <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert"></button>
+</div>
 {% endif %}
 
-<div class="card">
-  <h2>SLA Threshold</h2>
-  <p style="font-size:.85rem;color:#555;margin-bottom:.75rem">
-    Seconds before an unactioned inbound message triggers an escalation alert.
-  </p>
-  <form method="post" action="/dashboard/settings/sla" style="display:flex;gap:.75rem;align-items:flex-end">
-    <div>
-      <label>Seconds</label>
-      <input type="number" name="sla_seconds" value="{{ hotel.sla_seconds }}" min="5" max="3600" style="width:100px"/>
-    </div>
-    <button type="submit" class="btn btn-primary">Save</button>
-  </form>
-</div>
+<ul class="nav nav-tabs mb-4" id="settingsTabs">
+  <li class="nav-item">
+    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#hotelInfo">
+      <i class="bi bi-building me-2"></i>Hotel Info
+    </button>
+  </li>
+  <li class="nav-item">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#slaConfig">
+      <i class="bi bi-stopwatch me-2"></i>SLA Config
+    </button>
+  </li>
+  <li class="nav-item">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#staffMgmt">
+      <i class="bi bi-people-fill me-2"></i>Staff Management
+    </button>
+  </li>
+  <li class="nav-item">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#whatsappTab">
+      <i class="bi bi-whatsapp me-2 text-success"></i>WhatsApp
+    </button>
+  </li>
+</ul>
 
-<div class="card">
-  <h2>Hotel</h2>
-  <table style="width:auto">
-    <tr><td style="padding:5px 10px 5px 0;color:#666">Name</td><td><strong>{{ hotel.name }}</strong></td></tr>
-    <tr><td style="padding:5px 10px 5px 0;color:#666">Hotel ID</td><td><code style="font-size:.85rem">{{ hotel.id }}</code></td></tr>
-    <tr><td style="padding:5px 10px 5px 0;color:#666">WA Phone Number ID</td><td><code style="font-size:.85rem">{{ hotel.whatsapp_phone_number_id }}</code></td></tr>
-    <tr><td style="padding:5px 10px 5px 0;color:#666">Manager WA</td><td>{{ hotel.manager_wa_e164 }}</td></tr>
-  </table>
-</div>
+<div class="tab-content">
+  <!-- ── Hotel Info ── -->
+  <div class="tab-pane fade show active" id="hotelInfo">
+    <div class="data-card">
+      <div class="data-card-hdr"><h6><i class="bi bi-building-fill me-2"></i>Hotel Information</h6></div>
+      <div class="p-4">
+        <dl class="row mb-0" style="font-size:.88rem">
+          <dt class="col-sm-4 text-secondary">Hotel Name</dt>
+          <dd class="col-sm-8 fw-semibold">{{ hotel.name }}</dd>
+          <dt class="col-sm-4 text-secondary">Hotel ID</dt>
+          <dd class="col-sm-8"><code style="font-size:.82rem;background:#f1f5f9;padding:2px 6px;border-radius:4px">{{ hotel.id }}</code></dd>
+          <dt class="col-sm-4 text-secondary">WhatsApp Phone Number ID</dt>
+          <dd class="col-sm-8"><code style="font-size:.82rem;background:#f1f5f9;padding:2px 6px;border-radius:4px">{{ hotel.whatsapp_phone_number_id }}</code></dd>
+          <dt class="col-sm-4 text-secondary">Business Phone (E.164)</dt>
+          <dd class="col-sm-8">{{ hotel.whatsapp_business_phone_e164 }}</dd>
+          <dt class="col-sm-4 text-secondary">Manager WhatsApp</dt>
+          <dd class="col-sm-8">{{ hotel.manager_wa_e164 }}</dd>
+          <dt class="col-sm-4 text-secondary">SLA Threshold</dt>
+          <dd class="col-sm-8"><span class="badge bg-primary">{{ hotel.sla_seconds }}s</span></dd>
+        </dl>
+        <div class="alert border-0 mt-3 mb-0 p-3" style="background:#eff6ff;font-size:.8rem;border-radius:.5rem">
+          <i class="bi bi-info-circle-fill text-primary me-1"></i>
+          Share the <strong>Hotel ID</strong> with staff so they can log in.
+        </div>
+      </div>
+    </div>
+  </div>
 
-<div class="card">
-  <h2>Staff users</h2>
-  <table>
-    <thead>
-      <tr><th>Email</th><th>Role</th><th>Active</th><th>Created</th><th></th></tr>
-    </thead>
-    <tbody>
-      {% for s in staff %}
-      <tr>
-        <td>{{ s.email }}</td>
-        <td>{{ s.role }}</td>
-        <td>{{ "Yes" if s.is_active else "No" }}</td>
-        <td>{{ s.created_at.strftime('%d %b %Y') }}</td>
-        <td>
-          {% if s.is_active and s.id|string != user.staff_user_id %}
-          <form action="/dashboard/settings/staff/{{ s.id }}/deactivate" method="post" onsubmit="return confirm('Deactivate {{ s.email }}?')">
-            <button class="btn btn-danger btn-sm">Deactivate</button>
-          </form>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <!-- ── SLA Config ── -->
+  <div class="tab-pane fade" id="slaConfig">
+    <div class="data-card">
+      <div class="data-card-hdr"><h6><i class="bi bi-stopwatch-fill me-2"></i>SLA Threshold</h6></div>
+      <div class="p-4">
+        <p class="text-secondary mb-4" style="font-size:.88rem">
+          If an inbound guest message is not actioned within this time, it will be escalated via WhatsApp and push notification.
+        </p>
+        <form method="post" action="/dashboard/settings/sla" class="row g-3 align-items-end">
+          <div class="col-sm-4">
+            <label class="form-label fw-semibold">SLA Threshold (seconds)</label>
+            <input type="number" name="sla_seconds" class="form-control" value="{{ hotel.sla_seconds }}" min="5" max="3600"/>
+            <div class="form-text">Min: 5s &nbsp;|&nbsp; Max: 3600s (1 hour)</div>
+          </div>
+          <div class="col-auto">
+            <button type="submit" class="btn btn-primary"><i class="bi bi-save me-2"></i>Save</button>
+          </div>
+        </form>
+        <div class="row g-3 mt-3">
+          <div class="col-sm-4">
+            <div class="p-3 text-center border rounded-3" style="background:#f8fafc">
+              <div style="font-size:1.75rem;font-weight:700;color:#1d4ed8">{{ hotel.sla_seconds }}s</div>
+              <div style="font-size:.78rem;color:#64748b">Current threshold</div>
+            </div>
+          </div>
+          <div class="col-sm-4">
+            <div class="p-3 text-center border rounded-3" style="background:#f8fafc">
+              <div style="font-size:1.75rem;font-weight:700;color:#059669">{{ (hotel.sla_seconds / 60) | round(1) }}m</div>
+              <div style="font-size:.78rem;color:#64748b">In minutes</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
-  <h2 style="margin-top:1.25rem">Add staff user</h2>
-  <form method="post" action="/dashboard/settings/staff/add" style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-end;margin-top:.5rem">
-    <div>
-      <label>Email</label>
-      <input type="email" name="email" placeholder="agent@hotel.com" required style="width:220px"/>
+  <!-- ── Staff Management ── -->
+  <div class="tab-pane fade" id="staffMgmt">
+    <div class="row g-4">
+      <div class="col-lg-5">
+        <div class="data-card">
+          <div class="data-card-hdr"><h6><i class="bi bi-person-plus-fill me-2"></i>Add Staff User</h6></div>
+          <div class="p-4">
+            <form method="post" action="/dashboard/settings/staff/add">
+              <div class="mb-3">
+                <label class="form-label fw-semibold" style="font-size:.83rem">Email</label>
+                <input type="email" name="email" class="form-control" placeholder="staff@hotel.com" required/>
+              </div>
+              <div class="mb-3">
+                <label class="form-label fw-semibold" style="font-size:.83rem">Password</label>
+                <input type="password" name="password" class="form-control" placeholder="••••••••" required/>
+              </div>
+              <div class="mb-3">
+                <label class="form-label fw-semibold" style="font-size:.83rem">Role</label>
+                <select name="role" class="form-select">
+                  <option value="agent">Front Office Staff</option>
+                  <option value="manager">Manager</option>
+                </select>
+              </div>
+              <button type="submit" class="btn btn-primary w-100">
+                <i class="bi bi-person-plus me-2"></i>Add Staff Member
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-7">
+        <div class="data-card">
+          <div class="data-card-hdr">
+            <h6><i class="bi bi-people-fill me-2"></i>Staff Users</h6>
+            <span class="badge bg-light text-secondary border">{{ staff | length }}</span>
+          </div>
+          <div class="table-responsive">
+            <table class="table table-hover mb-0" style="font-size:.83rem">
+              <thead class="table-light">
+                <tr><th>Email</th><th>Role</th><th>Active</th><th>Joined</th><th></th></tr>
+              </thead>
+              <tbody>
+                {% for s in staff %}
+                <tr>
+                  <td class="fw-semibold">{{ s.email }}</td>
+                  <td>
+                    <span class="badge {% if s.role=='manager' %}bg-warning text-dark{% else %}bg-primary{% endif %}">
+                      {{ 'Manager' if s.role=='manager' else 'Front Office' }}
+                    </span>
+                  </td>
+                  <td>
+                    {% if s.is_active %}
+                    <span class="badge bg-success">Active</span>
+                    {% else %}
+                    <span class="badge bg-secondary">Inactive</span>
+                    {% endif %}
+                  </td>
+                  <td class="text-secondary">{{ s.created_at.strftime('%d %b %Y') }}</td>
+                  <td>
+                    {% if (s.id | string) != user.staff_user_id %}
+                    <div class="d-flex gap-1">
+                      {% if s.is_active %}
+                      <!-- Role toggle -->
+                      <form method="post" action="/dashboard/settings/staff/{{ s.id }}/role">
+                        <input type="hidden" name="role" value="{{ 'agent' if s.role == 'manager' else 'manager' }}"/>
+                        <button type="submit" class="btn btn-sm btn-outline-secondary py-0 px-2"
+                                title="{{ 'Demote to Front Office' if s.role == 'manager' else 'Promote to Manager' }}">
+                          <i class="bi {{ 'bi-arrow-down-circle' if s.role == 'manager' else 'bi-arrow-up-circle' }}"></i>
+                        </button>
+                      </form>
+                      <!-- Deactivate -->
+                      <form method="post" action="/dashboard/settings/staff/{{ s.id }}/deactivate"
+                            onsubmit="return confirm('Deactivate {{ s.email }}?')">
+                        <button class="btn btn-sm btn-outline-danger py-0 px-2"><i class="bi bi-person-dash"></i></button>
+                      </form>
+                      {% endif %}
+                    </div>
+                    {% endif %}
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
-    <div>
-      <label>Password</label>
-      <input type="password" name="password" placeholder="••••••••" required style="width:160px"/>
+  </div>
+
+  <!-- ── WhatsApp ── -->
+  <div class="tab-pane fade" id="whatsappTab">
+    <div class="data-card">
+      <div class="data-card-hdr"><h6><i class="bi bi-whatsapp text-success me-2"></i>WhatsApp Integration</h6></div>
+      <div class="p-4">
+        <dl class="row mb-0" style="font-size:.88rem">
+          <dt class="col-sm-4 text-secondary">Phone Number ID</dt>
+          <dd class="col-sm-8"><code style="font-size:.82rem;background:#f1f5f9;padding:2px 8px;border-radius:4px">{{ hotel.whatsapp_phone_number_id }}</code></dd>
+          <dt class="col-sm-4 text-secondary">Business Phone</dt>
+          <dd class="col-sm-8">{{ hotel.whatsapp_business_phone_e164 }}</dd>
+          <dt class="col-sm-4 text-secondary">Manager Notifications</dt>
+          <dd class="col-sm-8">{{ hotel.manager_wa_e164 }}</dd>
+          <dt class="col-sm-4 text-secondary">Access Token</dt>
+          <dd class="col-sm-8"><span class="badge bg-secondary">Encrypted (stored securely)</span></dd>
+          <dt class="col-sm-4 text-secondary">Graph API Version</dt>
+          <dd class="col-sm-8"><span class="badge bg-success">v25.0</span></dd>
+        </dl>
+        <div class="alert border-0 mt-3 mb-0 p-3" style="background:#f0fdf4;font-size:.8rem;border-radius:.5rem">
+          <i class="bi bi-shield-lock-fill text-success me-1"></i>
+          WhatsApp access tokens are encrypted with Fernet before storage. To rotate the token, update <code>SEED_HOTEL_ACCESS_TOKEN</code> in <code>.env</code> and re-seed.
+        </div>
+      </div>
     </div>
-    <div>
-      <label>Role</label>
-      <select name="role" style="width:120px">
-        <option value="agent">Agent</option>
-        <option value="manager">Manager</option>
-      </select>
-    </div>
-    <button type="submit" class="btn btn-primary">Add</button>
-  </form>
+  </div>
 </div>
 {% endblock %}

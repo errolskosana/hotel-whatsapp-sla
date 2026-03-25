@@ -11,7 +11,7 @@ def test_health(client):
 def test_login_page(client):
     resp = client.get("/login", follow_redirects=False)
     assert resp.status_code == 200
-    assert "Sign in" in resp.text
+    assert "Sign In" in resp.text
 
 
 def test_login_bad_credentials(client, hotel):

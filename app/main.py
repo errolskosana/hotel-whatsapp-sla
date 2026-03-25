@@ -22,6 +22,7 @@ from slowapi.util import get_remote_address
 
 from app.config import settings
 from app.db import db_session
+from app.tenant_db import get_tenant_session
 from app.models import (
     Base, Hotel, Room, Conversation, Message, GuestStay,
     PushSubscription, StaffUser, Escalation, KnowledgeChunk,
@@ -36,6 +37,7 @@ from app.whatsapp import verify_webhook_signature, send_whatsapp_text
 from app.ai import top_k_chunks, should_auto_answer, compose_grounded_answer
 from app.csv_import import import_guest_stays_csv
 from app.logger import configure_logging, get_logger
+from app.admin_router import router as admin_router
 
 configure_logging()
 log = get_logger(__name__)
@@ -44,6 +46,8 @@ limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.include_router(admin_router)
 
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -59,11 +63,62 @@ _DEFAULT_KNOWLEDGE = [
 
 @app.on_event("startup")
 def _startup():
+    # Seed the single-tenant demo hotel (noop if not configured or already seeded)
     db = next(db_session())
     try:
         seed_demo(db)
     finally:
         db.close()
+
+    # Initialise control plane and seed super admin + demo tenant (if configured)
+    if settings.control_plane_db_url:
+        _seed_control_plane()
+
+
+def _seed_control_plane():
+    """Seed super admin and register the demo hotel in the control plane."""
+    from app.control_plane import init_control_plane, get_cp_session_direct, SuperAdmin, TenantHotel
+    from app.auth import hash_password as _hp
+    from sqlalchemy import select as _sel
+
+    init_control_plane()
+    cp = get_cp_session_direct()
+    if cp is None:
+        return
+    try:
+        # Super admin
+        if settings.seed_superadmin_email and settings.seed_superadmin_password:
+            existing = cp.execute(
+                _sel(SuperAdmin).where(SuperAdmin.email == settings.seed_superadmin_email)
+            ).scalar_one_or_none()
+            if not existing:
+                cp.add(SuperAdmin(
+                    email=settings.seed_superadmin_email,
+                    password_hash=_hp(settings.seed_superadmin_password),
+                ))
+                cp.commit()
+                log.info("seeded_superadmin", email=settings.seed_superadmin_email)
+
+        # Register demo hotel in control plane
+        if settings.seed_hotel_phone_number_id and settings.seed_hotel_slug:
+            existing_tenant = cp.execute(
+                _sel(TenantHotel).where(TenantHotel.slug == settings.seed_hotel_slug)
+            ).scalar_one_or_none()
+            if not existing_tenant:
+                cp.add(TenantHotel(
+                    slug=settings.seed_hotel_slug,
+                    display_name=settings.seed_hotel_name or "Demo Hotel",
+                    db_url_enc=encrypt_str(settings.database_url),
+                    whatsapp_phone_number_id=settings.seed_hotel_phone_number_id,
+                    brand_name=settings.seed_hotel_name or "Demo Hotel",
+                ))
+                cp.commit()
+                log.info("seeded_demo_tenant", slug=settings.seed_hotel_slug)
+    except Exception as exc:
+        log.error("control_plane_seed_failed", error=str(exc))
+        cp.rollback()
+    finally:
+        cp.close()
 
 
 @app.get("/health", response_class=PlainTextResponse)
@@ -77,28 +132,114 @@ def health():
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
-    # If already logged in redirect to inbox
     if request.cookies.get("access_token"):
         return RedirectResponse("/dashboard/inbox", status_code=302)
-    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+    return templates.TemplateResponse("login.html", {
+        "request": request,
+        "error": None,
+        "multi_tenant": bool(settings.control_plane_db_url),
+    })
 
 
 @app.post("/login", response_class=HTMLResponse)
 def login_submit(
     request: Request,
-    hotel_id: str = Form(...),
+    hotel_id: str = Form(...),  # slug (multi-tenant) or hotel UUID (single-tenant)
     email: str = Form(...),
     password: str = Form(...),
-    db: Session = Depends(db_session),
 ):
-    user = authenticate_user(db, hotel_id, email, password)
-    if not user:
-        return templates.TemplateResponse(
-            "login.html",
-            {"request": request, "error": "Invalid hotel ID, email, or password."},
-            status_code=401,
-        )
-    token = create_access_token(str(user.id), str(user.hotel_id), user.role)
+    # ── Multi-tenant: resolve slug → tenant DB ──────────────────────────────
+    tenant_id = None
+    brand_kwargs: dict = {}
+
+    if settings.control_plane_db_url:
+        from app.control_plane import get_cp_session_direct, TenantHotel
+        from sqlalchemy import select as _sel
+        from sqlalchemy.orm import Session as _Sess
+        cp = get_cp_session_direct()
+        if cp is None:
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "Service unavailable. Please try again.", "multi_tenant": True},
+                status_code=503,
+            )
+        try:
+            tenant = cp.execute(
+                _sel(TenantHotel).where(
+                    TenantHotel.slug == hotel_id.strip().lower(),
+                    TenantHotel.is_active == True,
+                )
+            ).scalar_one_or_none()
+        finally:
+            cp.close()
+
+        if not tenant:
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "Hotel not found. Check your hotel identifier.", "multi_tenant": True},
+                status_code=401,
+            )
+
+        tenant_id = str(tenant.id)
+        brand_kwargs = {
+            "brand_name": tenant.brand_name or tenant.display_name,
+            "brand_color_primary": tenant.brand_color_primary or "",
+            "brand_color_sidebar": tenant.brand_color_sidebar or "",
+            "brand_tagline": tenant.brand_tagline or "",
+        }
+
+        # Authenticate against the tenant's own DB
+        from app.tenant_db import get_session_for_tenant
+        tenant_db = get_session_for_tenant(tenant_id)
+        try:
+            # hotel_id param holds slug; find the hotel record in tenant DB
+            hotel_rec = tenant_db.execute(
+                select(Hotel).where(Hotel.whatsapp_phone_number_id == tenant.whatsapp_phone_number_id)
+            ).scalar_one_or_none()
+            if not hotel_rec:
+                return templates.TemplateResponse(
+                    "login.html",
+                    {"request": request, "error": "Hotel not configured. Contact your administrator.", "multi_tenant": True},
+                    status_code=401,
+                )
+            user = authenticate_user(tenant_db, str(hotel_rec.id), email, password)
+            if not user:
+                return templates.TemplateResponse(
+                    "login.html",
+                    {"request": request, "error": "Invalid email or password.", "multi_tenant": True},
+                    status_code=401,
+                )
+            hotel_uuid = str(user.hotel_id)
+            user_id = str(user.id)
+            user_role = user.role
+            user_email = user.email
+        finally:
+            tenant_db.close()
+
+    else:
+        # ── Single-tenant: hotel_id is a UUID ──────────────────────────────
+        db = next(db_session())
+        try:
+            user = authenticate_user(db, hotel_id, email, password)
+        finally:
+            db.close()
+        if not user:
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "Invalid hotel ID, email, or password.", "multi_tenant": False},
+                status_code=401,
+            )
+        hotel_uuid = str(user.hotel_id)
+        user_id = str(user.id)
+        user_role = user.role
+        user_email = user.email
+
+    token = create_access_token(
+        user_id, hotel_uuid, user_role,
+        email=user_email,
+        tenant_id=tenant_id,
+        **brand_kwargs,
+    )
     response = RedirectResponse("/dashboard/inbox", status_code=302)
     response.set_cookie(
         "access_token",
@@ -108,7 +249,7 @@ def login_submit(
         secure=settings.app_env != "dev",
         max_age=settings.jwt_expiry_hours * 3600,
     )
-    log.info("login_success", user_id=str(user.id), role=user.role)
+    log.info("login_success", user_id=user_id, role=user_role)
     return response
 
 
@@ -135,7 +276,7 @@ def whatsapp_verify(request: Request):
 
 @app.post("/webhooks/whatsapp", response_class=PlainTextResponse)
 @limiter.limit("60/minute")
-async def whatsapp_webhook(request: Request, db: Session = Depends(db_session)):
+async def whatsapp_webhook(request: Request):
     raw = await request.body()
     sig = request.headers.get("x-hub-signature-256")
 
@@ -153,162 +294,188 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(db_session)):
         log.warning("webhook_parse_error", error=str(exc), payload=str(payload)[:200])
         return "OK"
 
-    hotel = db.execute(
-        select(Hotel).where(Hotel.whatsapp_phone_number_id == phone_number_id)
-    ).scalar_one_or_none()
-    if not hotel:
-        log.warning("unknown_phone_number_id", phone_number_id=phone_number_id)
-        return "OK"  # always ack to Meta; 4xx causes retries
+    # Resolve DB session for this phone number
+    # Multi-tenant: look up tenant by phone_number_id, use that DB
+    # Single-tenant: fall through to main DB
+    db_ctx = None
+    if settings.control_plane_db_url:
+        from app.control_plane import get_cp_session_direct, TenantHotel
+        from app.tenant_db import get_session_for_tenant
+        cp = get_cp_session_direct()
+        if cp:
+            try:
+                tenant = cp.execute(
+                    select(TenantHotel).where(TenantHotel.whatsapp_phone_number_id == phone_number_id)
+                ).scalar_one_or_none()
+            finally:
+                cp.close()
+            if tenant:
+                db_ctx = get_session_for_tenant(str(tenant.id))
 
-    # Handle delivery status updates
-    statuses = value.get("statuses") or []
-    for s in statuses:
-        wa_msg_id = s.get("id")
-        new_status = s.get("status")  # sent/delivered/read/failed
-        if wa_msg_id and new_status:
-            msg = db.execute(
-                select(Message).where(
-                    Message.hotel_id == hotel.id,
-                    Message.wa_message_id == wa_msg_id,
-                )
-            ).scalar_one_or_none()
-            if msg:
-                msg.wa_status = new_status
-                db.commit()
+    if db_ctx is None:
+        db_ctx = next(db_session())
 
-    # Handle inbound messages
-    messages = value.get("messages") or []
-    for m in messages:
-        wa_id = m["from"]
-        msg_type = m.get("type", "unknown")
+    db = db_ctx
+    try:
+        hotel = db.execute(
+            select(Hotel).where(Hotel.whatsapp_phone_number_id == phone_number_id)
+        ).scalar_one_or_none()
+        if not hotel:
+            log.warning("unknown_phone_number_id", phone_number_id=phone_number_id)
+            return "OK"  # always ack to Meta; 4xx causes retries
 
-        # Opt-out handling
-        if msg_type == "text":
-            body_text = m.get("text", {}).get("body", "")
-            if body_text.strip().upper() in ("STOP", "UNSUBSCRIBE", "OPT OUT", "OPTOUT"):
-                conv = db.execute(
-                    select(Conversation).where(
-                        Conversation.hotel_id == hotel.id,
-                        Conversation.wa_id == wa_id,
+        # Handle delivery status updates
+        statuses = value.get("statuses") or []
+        for s in statuses:
+            wa_msg_id = s.get("id")
+            new_status = s.get("status")  # sent/delivered/read/failed
+            if wa_msg_id and new_status:
+                msg = db.execute(
+                    select(Message).where(
+                        Message.hotel_id == hotel.id,
+                        Message.wa_message_id == wa_msg_id,
                     )
                 ).scalar_one_or_none()
-                if conv:
-                    conv.opted_out = True
+                if msg:
+                    msg.wa_status = new_status
                     db.commit()
-                log.info("guest_opted_out", hotel_id=str(hotel.id), wa_id=wa_id)
-                continue
-            body = body_text
-        elif msg_type == "image":
-            caption = m.get("image", {}).get("caption", "")
-            body = f"[image]{(' — ' + caption) if caption else ''}"
-        elif msg_type == "audio":
-            body = "[voice message]"
-        elif msg_type == "video":
-            caption = m.get("video", {}).get("caption", "")
-            body = f"[video]{(' — ' + caption) if caption else ''}"
-        elif msg_type == "document":
-            filename = m.get("document", {}).get("filename", "")
-            body = f"[document{': ' + filename if filename else ''}]"
-        elif msg_type == "location":
-            loc = m.get("location", {})
-            body = f"[location: {loc.get('latitude')},{loc.get('longitude')}]"
-        else:
-            body = f"[{msg_type} message]"
 
-        # Idempotency: skip if we already processed this wa_message_id
-        wa_msg_id = m.get("id")
-        if wa_msg_id:
-            existing = db.execute(
-                select(Message).where(
-                    Message.hotel_id == hotel.id,
-                    Message.wa_message_id == wa_msg_id,
+        # Handle inbound messages
+        messages = value.get("messages") or []
+        for m in messages:
+            wa_id = m["from"]
+            msg_type = m.get("type", "unknown")
+
+            # Opt-out handling
+            if msg_type == "text":
+                body_text = m.get("text", {}).get("body", "")
+                if body_text.strip().upper() in ("STOP", "UNSUBSCRIBE", "OPT OUT", "OPTOUT"):
+                    conv = db.execute(
+                        select(Conversation).where(
+                            Conversation.hotel_id == hotel.id,
+                            Conversation.wa_id == wa_id,
+                        )
+                    ).scalar_one_or_none()
+                    if conv:
+                        conv.opted_out = True
+                        db.commit()
+                    log.info("guest_opted_out", hotel_id=str(hotel.id), wa_id=wa_id)
+                    continue
+                body = body_text
+            elif msg_type == "image":
+                caption = m.get("image", {}).get("caption", "")
+                body = f"[image]{(' — ' + caption) if caption else ''}"
+            elif msg_type == "audio":
+                body = "[voice message]"
+            elif msg_type == "video":
+                caption = m.get("video", {}).get("caption", "")
+                body = f"[video]{(' — ' + caption) if caption else ''}"
+            elif msg_type == "document":
+                filename = m.get("document", {}).get("filename", "")
+                body = f"[document{': ' + filename if filename else ''}]"
+            elif msg_type == "location":
+                loc = m.get("location", {})
+                body = f"[location: {loc.get('latitude')},{loc.get('longitude')}]"
+            else:
+                body = f"[{msg_type} message]"
+
+            # Idempotency: skip if we already processed this wa_message_id
+            wa_msg_id = m.get("id")
+            if wa_msg_id:
+                existing = db.execute(
+                    select(Message).where(
+                        Message.hotel_id == hotel.id,
+                        Message.wa_message_id == wa_msg_id,
+                    )
+                ).scalar_one_or_none()
+                if existing:
+                    continue
+
+            conv = db.execute(
+                select(Conversation).where(
+                    Conversation.hotel_id == hotel.id, Conversation.wa_id == wa_id
                 )
             ).scalar_one_or_none()
-            if existing:
+            if not conv:
+                conv = Conversation(
+                    hotel_id=hotel.id, wa_id=wa_id, last_message_at=datetime.utcnow()
+                )
+                db.add(conv)
+                db.commit()
+
+            # Skip opted-out guests
+            if conv.opted_out:
+                log.info("skipped_opted_out_guest", wa_id=wa_id)
                 continue
 
-        conv = db.execute(
-            select(Conversation).where(
-                Conversation.hotel_id == hotel.id, Conversation.wa_id == wa_id
+            msg = Message(
+                hotel_id=hotel.id,
+                conversation_id=conv.id,
+                direction="in",
+                wa_message_id=wa_msg_id,
+                body=body,
+                received_at=datetime.utcnow(),
+                status="unactioned",
             )
-        ).scalar_one_or_none()
-        if not conv:
-            conv = Conversation(
-                hotel_id=hotel.id, wa_id=wa_id, last_message_at=datetime.utcnow()
-            )
-            db.add(conv)
+            db.add(msg)
+            conv.last_message_at = datetime.utcnow()
             db.commit()
 
-        # Skip opted-out guests
-        if conv.opted_out:
-            log.info("skipped_opted_out_guest", wa_id=wa_id)
-            continue
+            # Bind room/stay from QR START message
+            if isinstance(body, str) and body.startswith("START") and "ROOM=" in body and "HOTEL_ID=" in body:
+                try:
+                    room = body.split("ROOM=", 1)[1].split()[0].strip()
+                    conv.room_number = room
+                    today = date.today()
+                    stay = db.execute(
+                        select(GuestStay)
+                        .where(GuestStay.hotel_id == hotel.id)
+                        .where(GuestStay.room_number == room)
+                        .where(GuestStay.arrival_date <= today)
+                        .where(GuestStay.departure_date >= today)
+                        .order_by(GuestStay.arrival_date.desc())
+                    ).scalars().first()
+                    conv.stay_id = stay.id if stay else None
+                    db.commit()
+                except Exception as exc:
+                    db.rollback()
+                    log.warning("room_bind_failed", wa_id=wa_id, error=str(exc))
 
-        msg = Message(
-            hotel_id=hotel.id,
-            conversation_id=conv.id,
-            direction="in",
-            wa_message_id=wa_msg_id,
-            body=body,
-            received_at=datetime.utcnow(),
-            status="unactioned",
-        )
-        db.add(msg)
-        conv.last_message_at = datetime.utcnow()
-        db.commit()
-
-        # Bind room/stay from QR START message
-        if isinstance(body, str) and body.startswith("START") and "ROOM=" in body and "HOTEL_ID=" in body:
-            try:
-                room = body.split("ROOM=", 1)[1].split()[0].strip()
-                conv.room_number = room
-                today = date.today()
-                stay = db.execute(
-                    select(GuestStay)
-                    .where(GuestStay.hotel_id == hotel.id)
-                    .where(GuestStay.room_number == room)
-                    .where(GuestStay.arrival_date <= today)
-                    .where(GuestStay.departure_date >= today)
-                    .order_by(GuestStay.arrival_date.desc())
-                ).scalars().first()
-                conv.stay_id = stay.id if stay else None
-                db.commit()
-            except Exception as exc:
-                db.rollback()
-                log.warning("room_bind_failed", wa_id=wa_id, error=str(exc))
-
-        # Guardrailed AI — use DB knowledge chunks, fall back to defaults
-        db_chunks = db.execute(
-            select(KnowledgeChunk).where(
-                KnowledgeChunk.hotel_id == hotel.id,
-                KnowledgeChunk.is_active == True,
-            )
-        ).scalars().all()
-        knowledge_chunks = [c.content for c in db_chunks] if db_chunks else _DEFAULT_KNOWLEDGE
-        retrieved = top_k_chunks(body, knowledge_chunks, k=3)
-        if should_auto_answer(retrieved):
-            answer = compose_grounded_answer(body, retrieved)
-            try:
-                token = decrypt_str(hotel.whatsapp_access_token_enc)
-                await send_whatsapp_text(
-                    phone_number_id=hotel.whatsapp_phone_number_id,
-                    access_token=token,
-                    to_e164_or_waid=wa_id,
-                    text=answer,
+            # Guardrailed AI — use DB knowledge chunks, fall back to defaults
+            db_chunks = db.execute(
+                select(KnowledgeChunk).where(
+                    KnowledgeChunk.hotel_id == hotel.id,
+                    KnowledgeChunk.is_active == True,
                 )
-                # Record outbound AI reply
-                out_msg = Message(
-                    hotel_id=hotel.id,
-                    conversation_id=conv.id,
-                    direction="out",
-                    body=answer,
-                    received_at=datetime.utcnow(),
-                    status="auto_replied",
-                )
-                db.add(out_msg)
-                db.commit()
-            except Exception as exc:
-                log.error("ai_reply_failed", wa_id=wa_id, error=str(exc))
+            ).scalars().all()
+            knowledge_chunks = [c.content for c in db_chunks] if db_chunks else _DEFAULT_KNOWLEDGE
+            retrieved = top_k_chunks(body, knowledge_chunks, k=3)
+            if should_auto_answer(retrieved):
+                answer = compose_grounded_answer(body, retrieved)
+                try:
+                    token = decrypt_str(hotel.whatsapp_access_token_enc)
+                    await send_whatsapp_text(
+                        phone_number_id=hotel.whatsapp_phone_number_id,
+                        access_token=token,
+                        to_e164_or_waid=wa_id,
+                        text=answer,
+                    )
+                    # Record outbound AI reply
+                    out_msg = Message(
+                        hotel_id=hotel.id,
+                        conversation_id=conv.id,
+                        direction="out",
+                        body=answer,
+                        received_at=datetime.utcnow(),
+                        status="auto_replied",
+                    )
+                    db.add(out_msg)
+                    db.commit()
+                except Exception as exc:
+                    log.error("ai_reply_failed", wa_id=wa_id, error=str(exc))
+
+    finally:
+        db.close()
 
     return "OK"
 
@@ -317,13 +484,17 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(db_session)):
 # SSE — real-time inbox updates
 # ---------------------------------------------------------------------------
 
-async def _inbox_event_stream(hotel_id: str) -> AsyncGenerator[str, None]:
+async def _inbox_event_stream(hotel_id: str, tenant_id: str | None) -> AsyncGenerator[str, None]:
     """Poll DB every 3 seconds and push new unactioned message counts."""
     last_count = -1
     while True:
         await asyncio.sleep(3)
         try:
-            db = next(db_session())
+            if tenant_id and settings.control_plane_db_url:
+                from app.tenant_db import get_session_for_tenant
+                db = get_session_for_tenant(tenant_id)
+            else:
+                db = next(db_session())
             try:
                 count = db.execute(
                     select(func.count(Message.id)).where(
@@ -344,7 +515,7 @@ async def _inbox_event_stream(hotel_id: str) -> AsyncGenerator[str, None]:
 @app.get("/api/sse/inbox")
 async def inbox_sse(user: CurrentUser = Depends(get_current_user)):
     return StreamingResponse(
-        _inbox_event_stream(user.hotel_id),
+        _inbox_event_stream(user.hotel_id, user.tenant_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -360,7 +531,7 @@ def inbox(
     status_filter: str = "all",
     room_filter: str = "",
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     hotel_id = uuid.UUID(user.hotel_id)
 
@@ -452,7 +623,7 @@ def push_page(request: Request, user: CurrentUser = Depends(get_current_user)):
 def knowledge_page(
     request: Request,
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     hotel_id = uuid.UUID(user.hotel_id)
     chunks = db.execute(
@@ -472,7 +643,7 @@ def knowledge_add(
     request: Request,
     content: str = Form(...),
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     if content.strip():
         db.add(KnowledgeChunk(
@@ -487,7 +658,7 @@ def knowledge_add(
 def knowledge_delete(
     chunk_id: str,
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     chunk = db.get(KnowledgeChunk, uuid.UUID(chunk_id))
     if not chunk or str(chunk.hotel_id) != user.hotel_id:
@@ -495,6 +666,37 @@ def knowledge_delete(
     db.delete(chunk)
     db.commit()
     return RedirectResponse("/dashboard/knowledge", status_code=302)
+
+
+@app.post("/dashboard/knowledge/pdf")
+async def knowledge_pdf_upload(
+    file: UploadFile = File(...),
+    user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_tenant_session),
+):
+    import pdfplumber
+    import io
+    import re
+    try:
+        content = await file.read()
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            full_text = "\n\n".join(
+                page.extract_text() or "" for page in pdf.pages
+            )
+        raw_chunks = re.split(r'\n{2,}', full_text)
+        hotel_id = uuid.UUID(user.hotel_id)
+        added = 0
+        for chunk in raw_chunks:
+            chunk = " ".join(chunk.split())
+            if len(chunk) < 40 or added >= 200:
+                continue
+            db.add(KnowledgeChunk(hotel_id=hotel_id, content=chunk, is_active=True))
+            added += 1
+        db.commit()
+        return RedirectResponse(f"/dashboard/knowledge?pdf_msg={added}", status_code=302)
+    except Exception as exc:
+        log.error("pdf_upload_failed", error=str(exc))
+        return RedirectResponse("/dashboard/knowledge?pdf_err=1", status_code=302)
 
 
 # ---------------------------------------------------------------------------
@@ -505,7 +707,7 @@ def knowledge_delete(
 def rooms_page(
     request: Request,
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     hotel_id = uuid.UUID(user.hotel_id)
     rooms = db.execute(
@@ -524,7 +726,7 @@ def room_add(
     room_number: str = Form(...),
     room_type: str = Form("standard"),
     user: CurrentUser = Depends(require_manager),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     hotel_id = uuid.UUID(user.hotel_id)
     existing = db.execute(
@@ -540,7 +742,7 @@ def room_add(
 def room_delete(
     room_id: str,
     user: CurrentUser = Depends(require_manager),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     room = db.get(Room, uuid.UUID(room_id))
     if not room or str(room.hotel_id) != user.hotel_id:
@@ -558,7 +760,7 @@ def room_delete(
 def stays_page(
     request: Request,
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     hotel_id = uuid.UUID(user.hotel_id)
     today = date.today()
@@ -581,7 +783,7 @@ def stays_import(
     request: Request,
     file: UploadFile = File(...),
     user: CurrentUser = Depends(require_manager),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     try:
         count = import_guest_stays_csv(db, uuid.UUID(user.hotel_id), file.file)
@@ -613,17 +815,20 @@ def stays_import(
 @app.get("/dashboard/analytics", response_class=HTMLResponse)
 def analytics_page(
     request: Request,
+    days: int = 7,
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     hotel_id = uuid.UUID(user.hotel_id)
-    last_7 = datetime.utcnow() - timedelta(days=7)
+    if days not in (7, 30):
+        days = 7
+    last_n = datetime.utcnow() - timedelta(days=days)
 
     total_in = db.execute(
         select(func.count(Message.id)).where(
             Message.hotel_id == hotel_id,
             Message.direction == "in",
-            Message.received_at >= last_7,
+            Message.received_at >= last_n,
         )
     ).scalar() or 0
 
@@ -632,7 +837,7 @@ def analytics_page(
             Message.hotel_id == hotel_id,
             Message.direction == "in",
             Message.escalated_at.is_not(None),
-            Message.received_at >= last_7,
+            Message.received_at >= last_n,
         )
     ).scalar() or 0
 
@@ -640,11 +845,41 @@ def analytics_page(
         select(func.count(Message.id)).where(
             Message.hotel_id == hotel_id,
             Message.status.in_(["replied", "auto_replied"]),
-            Message.received_at >= last_7,
+            Message.received_at >= last_n,
         )
     ).scalar() or 0
 
-    # Recent escalations
+    total_auto_replied = db.execute(
+        select(func.count(Message.id)).where(
+            Message.hotel_id == hotel_id,
+            Message.status == "auto_replied",
+            Message.received_at >= last_n,
+        )
+    ).scalar() or 0
+
+    # Daily data for charts
+    daily_labels, daily_msgs, daily_esc, daily_rep = [], [], [], []
+    for i in range(days - 1, -1, -1):
+        day = datetime.utcnow().date() - timedelta(days=i)
+        d0 = datetime(day.year, day.month, day.day)
+        d1 = d0 + timedelta(days=1)
+        c_in = db.execute(select(func.count(Message.id)).where(
+            Message.hotel_id == hotel_id, Message.direction == "in",
+            Message.received_at >= d0, Message.received_at < d1,
+        )).scalar() or 0
+        c_esc = db.execute(select(func.count(Message.id)).where(
+            Message.hotel_id == hotel_id, Message.escalated_at.is_not(None),
+            Message.received_at >= d0, Message.received_at < d1,
+        )).scalar() or 0
+        c_rep = db.execute(select(func.count(Message.id)).where(
+            Message.hotel_id == hotel_id, Message.status.in_(["replied", "auto_replied"]),
+            Message.received_at >= d0, Message.received_at < d1,
+        )).scalar() or 0
+        daily_labels.append(day.strftime("%b %d"))
+        daily_msgs.append(c_in)
+        daily_esc.append(c_esc)
+        daily_rep.append(c_rep)
+
     escalations = db.execute(
         select(Escalation)
         .where(Escalation.hotel_id == hotel_id)
@@ -660,9 +895,15 @@ def analytics_page(
         "total_in": total_in,
         "total_escalated": total_escalated,
         "total_replied": total_replied,
+        "total_auto_replied": total_auto_replied,
         "breach_rate": round(total_escalated / total_in * 100, 1) if total_in else 0,
         "escalations": escalations,
         "hotel": hotel,
+        "days": days,
+        "daily_labels": json.dumps(daily_labels),
+        "daily_msgs": json.dumps(daily_msgs),
+        "daily_esc": json.dumps(daily_esc),
+        "daily_rep": json.dumps(daily_rep),
     })
 
 
@@ -674,7 +915,7 @@ def analytics_page(
 def settings_page(
     request: Request,
     user: CurrentUser = Depends(require_manager),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     hotel = db.get(Hotel, uuid.UUID(user.hotel_id))
     staff = db.execute(
@@ -694,7 +935,7 @@ def update_sla(
     request: Request,
     sla_seconds: int = Form(...),
     user: CurrentUser = Depends(require_manager),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     hotel = db.get(Hotel, uuid.UUID(user.hotel_id))
     if sla_seconds < 5:
@@ -720,7 +961,7 @@ def staff_add(
     password: str = Form(...),
     role: str = Form("agent"),
     user: CurrentUser = Depends(require_manager),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     hotel_id = uuid.UUID(user.hotel_id)
     existing = db.execute(
@@ -741,13 +982,31 @@ def staff_add(
 def staff_deactivate(
     staff_id: str,
     user: CurrentUser = Depends(require_manager),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     staff = db.get(StaffUser, uuid.UUID(staff_id))
     if not staff or str(staff.hotel_id) != user.hotel_id:
         raise HTTPException(status_code=404)
     staff.is_active = False
     db.commit()
+    return RedirectResponse("/dashboard/settings", status_code=302)
+
+
+@app.post("/dashboard/settings/staff/{staff_id}/role")
+def staff_change_role(
+    staff_id: str,
+    role: str = Form(...),
+    user: CurrentUser = Depends(require_manager),
+    db: Session = Depends(get_tenant_session),
+):
+    staff = db.get(StaffUser, uuid.UUID(staff_id))
+    if not staff or str(staff.hotel_id) != user.hotel_id:
+        raise HTTPException(status_code=404)
+    if str(staff.id) == user.staff_user_id:
+        raise HTTPException(status_code=400, detail="Cannot change your own role")
+    if role in ("agent", "manager"):
+        staff.role = role
+        db.commit()
     return RedirectResponse("/dashboard/settings", status_code=302)
 
 
@@ -759,7 +1018,7 @@ def staff_deactivate(
 def ack_message(
     message_id: str,
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     msg = db.get(Message, uuid.UUID(message_id))
     if not msg or str(msg.hotel_id) != user.hotel_id:
@@ -778,7 +1037,7 @@ async def reply_message(
     message_id: str,
     reply: str = Form(...),
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     msg = db.get(Message, uuid.UUID(message_id))
     if not msg or str(msg.hotel_id) != user.hotel_id:
@@ -840,7 +1099,7 @@ def vapid_key():
 async def push_subscribe(
     request: Request,
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     data = await request.json()
     sub = data["subscription"]
@@ -873,7 +1132,7 @@ async def push_subscribe(
 @app.get("/api/demo_ids", response_class=JSONResponse)
 def demo_ids(
     user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     return {"hotel_id": user.hotel_id, "staff_user_id": user.staff_user_id}
 
@@ -887,7 +1146,7 @@ def import_csv(
     hotel_id: str = Form(...),
     file: UploadFile = File(...),
     user: CurrentUser = Depends(require_manager),
-    db: Session = Depends(db_session),
+    db: Session = Depends(get_tenant_session),
 ):
     if hotel_id != user.hotel_id:
         raise HTTPException(status_code=403, detail="Forbidden")

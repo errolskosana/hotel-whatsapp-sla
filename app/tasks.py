@@ -36,92 +36,115 @@ def _db() -> Session:
     return SessionLocal()
 
 
+def _scan_db(db: Session) -> None:
+    """Run the SLA scan on a single DB session (one hotel namespace)."""
+    hotels = db.execute(select(Hotel)).scalars().all()
+    if not hotels:
+        return
+    hotel_map = {h.id: h for h in hotels}
+
+    min_sla = min((h.sla_seconds for h in hotels), default=20)
+    cutoff = datetime.utcnow() - timedelta(seconds=min_sla)
+
+    stmt = (
+        select(Message)
+        .where(Message.status == "unactioned")
+        .where(Message.direction == "in")
+        .where(Message.received_at <= cutoff)
+        .where(Message.escalated_at.is_(None))
+        .limit(50)
+    )
+    msgs = db.execute(stmt).scalars().all()
+
+    for msg in msgs:
+        hotel = hotel_map.get(msg.hotel_id)
+        if not hotel:
+            continue
+
+        hotel_cutoff = datetime.utcnow() - timedelta(seconds=hotel.sla_seconds)
+        if msg.received_at > hotel_cutoff:
+            continue
+
+        try:
+            esc = Escalation(hotel_id=hotel.id, message_id=msg.id)
+            db.add(esc)
+            msg.escalated_at = datetime.utcnow()
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            log.warning("escalation_insert_failed", message_id=str(msg.id), error=str(exc))
+            continue
+
+        token = decrypt_str(hotel.whatsapp_access_token_enc)
+
+        try:
+            text = f"SLA breach: guest message not actioned in {hotel.sla_seconds}s. message_id={msg.id}"
+            send_whatsapp_text_sync(
+                phone_number_id=hotel.whatsapp_phone_number_id,
+                access_token=token,
+                to_e164_or_waid=hotel.manager_wa_e164,
+                text=text,
+            )
+            esc.whatsapp_notified_at = datetime.utcnow()
+            db.commit()
+            log.info("manager_notified_whatsapp", message_id=str(msg.id))
+        except Exception as exc:
+            db.rollback()
+            log.error("manager_whatsapp_notify_failed", message_id=str(msg.id), error=str(exc))
+
+        subs = db.execute(
+            select(PushSubscription).where(PushSubscription.hotel_id == hotel.id)
+        ).scalars().all()
+        push_succeeded = False
+        for s in subs:
+            try:
+                send_push(
+                    {"endpoint": s.endpoint, "keys": {"p256dh": s.p256dh, "auth": s.auth}},
+                    title="SLA Escalation",
+                    body=f"Guest request not actioned within {hotel.sla_seconds}s.",
+                )
+                push_succeeded = True
+            except Exception as exc:
+                log.error("push_notify_failed", subscription_id=str(s.id), error=str(exc))
+        if push_succeeded:
+            try:
+                esc.push_notified_at = datetime.utcnow()
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                log.error("push_notified_at_save_failed", message_id=str(msg.id), error=str(exc))
+
+
 @celery_app.task(name="app.tasks.scan_sla_and_escalate")
 def scan_sla_and_escalate():
-    db = _db()
-    try:
-        # Fetch all hotels so we can use per-hotel SLA seconds
-        hotels = db.execute(select(Hotel)).scalars().all()
-        hotel_map = {h.id: h for h in hotels}
-
-        # Use the minimum SLA across hotels as the outer cutoff, then filter per message
-        min_sla = min((h.sla_seconds for h in hotels), default=20)
-        cutoff = datetime.utcnow() - timedelta(seconds=min_sla)
-
-        stmt = (
-            select(Message)
-            .where(Message.status == "unactioned")
-            .where(Message.direction == "in")
-            .where(Message.received_at <= cutoff)
-            .where(Message.escalated_at.is_(None))
-            .limit(50)
-        )
-        msgs = db.execute(stmt).scalars().all()
-
-        for msg in msgs:
-            hotel = hotel_map.get(msg.hotel_id)
-            if not hotel:
-                continue
-
-            # Check per-hotel SLA
-            hotel_cutoff = datetime.utcnow() - timedelta(seconds=hotel.sla_seconds)
-            if msg.received_at > hotel_cutoff:
-                continue
-
-            # Create escalation record (idempotent via unique message_id)
-            try:
-                esc = Escalation(hotel_id=hotel.id, message_id=msg.id)
-                db.add(esc)
-                msg.escalated_at = datetime.utcnow()
-                db.commit()
-            except Exception as exc:
-                db.rollback()
-                log.warning("escalation_insert_failed", message_id=str(msg.id), error=str(exc))
-                continue
-
-            token = decrypt_str(hotel.whatsapp_access_token_enc)
-
-            # WhatsApp notify manager (sync client — no asyncio.run())
-            try:
-                text = f"SLA breach: guest message not actioned in {hotel.sla_seconds}s. message_id={msg.id}"
-                send_whatsapp_text_sync(
-                    phone_number_id=hotel.whatsapp_phone_number_id,
-                    access_token=token,
-                    to_e164_or_waid=hotel.manager_wa_e164,
-                    text=text,
-                )
-                esc.whatsapp_notified_at = datetime.utcnow()
-                db.commit()
-                log.info("manager_notified_whatsapp", message_id=str(msg.id))
-            except Exception as exc:
-                db.rollback()
-                log.error("manager_whatsapp_notify_failed", message_id=str(msg.id), error=str(exc))
-
-            # Web Push notify (all subscriptions for hotel)
-            subs = db.execute(
-                select(PushSubscription).where(PushSubscription.hotel_id == hotel.id)
+    if settings.control_plane_db_url:
+        # Multi-tenant: scan every active tenant's DB
+        from app.control_plane import get_cp_session_direct, TenantHotel
+        from app.tenant_db import get_session_for_tenant
+        cp = get_cp_session_direct()
+        if cp is None:
+            return
+        try:
+            tenants = cp.execute(
+                select(TenantHotel).where(TenantHotel.is_active == True)
             ).scalars().all()
-            push_succeeded = False
-            for s in subs:
-                try:
-                    send_push(
-                        {
-                            "endpoint": s.endpoint,
-                            "keys": {"p256dh": s.p256dh, "auth": s.auth},
-                        },
-                        title="SLA Escalation",
-                        body=f"Guest request not actioned within {hotel.sla_seconds}s.",
-                    )
-                    push_succeeded = True
-                except Exception as exc:
-                    log.error("push_notify_failed", subscription_id=str(s.id), error=str(exc))
-            if push_succeeded:
-                try:
-                    esc.push_notified_at = datetime.utcnow()
-                    db.commit()
-                except Exception as exc:
-                    db.rollback()
-                    log.error("push_notified_at_save_failed", message_id=str(msg.id), error=str(exc))
+        finally:
+            cp.close()
 
-    finally:
-        db.close()
+        for tenant in tenants:
+            tenant_db = None
+            try:
+                tenant_db = get_session_for_tenant(str(tenant.id))
+                _scan_db(tenant_db)
+            except Exception as exc:
+                log.error("sla_scan_tenant_failed", tenant_id=str(tenant.id), error=str(exc))
+            finally:
+                if tenant_db:
+                    tenant_db.close()
+    else:
+        # Single-tenant: scan the main DB
+        db = _db()
+        try:
+            _scan_db(db)
+        finally:
+            db.close()

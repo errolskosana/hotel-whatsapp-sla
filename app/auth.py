@@ -33,13 +33,29 @@ def verify_password(password: str, hashed: str) -> bool:
 # Token helpers
 # ---------------------------------------------------------------------------
 
-def create_access_token(staff_user_id: str, hotel_id: str, role: str) -> str:
+def create_access_token(
+    staff_user_id: str,
+    hotel_id: str,
+    role: str,
+    email: str = "",
+    tenant_id: str | None = None,
+    brand_name: str = "",
+    brand_color_primary: str = "",
+    brand_color_sidebar: str = "",
+    brand_tagline: str = "",
+) -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=settings.jwt_expiry_hours)
     payload = {
         "sub": staff_user_id,
         "hotel_id": hotel_id,
         "role": role,
+        "email": email,
         "exp": expire,
+        "tenant_id": tenant_id,
+        "brand_name": brand_name,
+        "brand_color_primary": brand_color_primary,
+        "brand_color_sidebar": brand_color_sidebar,
+        "brand_tagline": brand_tagline,
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=ALGORITHM)
 
@@ -56,10 +72,27 @@ def decode_token(token: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 class CurrentUser:
-    def __init__(self, staff_user_id: str, hotel_id: str, role: str):
+    def __init__(
+        self,
+        staff_user_id: str,
+        hotel_id: str,
+        role: str,
+        email: str = "",
+        tenant_id: str | None = None,
+        brand_name: str = "",
+        brand_color_primary: str = "",
+        brand_color_sidebar: str = "",
+        brand_tagline: str = "",
+    ):
         self.staff_user_id = staff_user_id
         self.hotel_id = hotel_id
         self.role = role
+        self.email = email
+        self.tenant_id = tenant_id
+        self.brand_name = brand_name
+        self.brand_color_primary = brand_color_primary
+        self.brand_color_sidebar = brand_color_sidebar
+        self.brand_tagline = brand_tagline
 
     @property
     def is_manager(self) -> bool:
@@ -87,6 +120,12 @@ def get_current_user(request: Request) -> CurrentUser:
         staff_user_id=payload["sub"],
         hotel_id=payload["hotel_id"],
         role=payload["role"],
+        email=payload.get("email", ""),
+        tenant_id=payload.get("tenant_id"),
+        brand_name=payload.get("brand_name", ""),
+        brand_color_primary=payload.get("brand_color_primary", ""),
+        brand_color_sidebar=payload.get("brand_color_sidebar", ""),
+        brand_tagline=payload.get("brand_tagline", ""),
     )
 
 

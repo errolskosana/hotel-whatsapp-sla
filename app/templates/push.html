@@ -1,18 +1,31 @@
 {% extends "base.html" %}
-{% block title %}Push Setup — Hotel SLA{% endblock %}
+{% block title %}Push Alerts — Hotel SLA{% endblock %}
+{% block page_title %}Push Alert Setup{% endblock %}
 
 {% block content %}
-<h1>Web Push Setup</h1>
-<div class="card">
-  <p style="margin-bottom:1rem;color:#555">
-    Subscribe this browser to receive escalation alerts even when the dashboard is not open.
-  </p>
-  <ol style="margin-left:1.25rem;margin-bottom:1rem;color:#444;font-size:.9rem">
-    <li>Click <strong>Subscribe</strong> and allow browser notifications when prompted.</li>
-    <li>Open DevTools console to see subscription status.</li>
-  </ol>
-  <button id="btn" class="btn btn-primary">Subscribe for push alerts</button>
-  <p id="status" style="margin-top:.75rem;font-size:.88rem;color:#555"></p>
+<div class="row justify-content-center">
+  <div class="col-lg-6">
+    <div class="data-card">
+      <div class="data-card-hdr"><h6><i class="bi bi-bell-fill me-2"></i>Web Push Notifications</h6></div>
+      <div class="p-4">
+        <p class="text-secondary mb-4" style="font-size:.88rem">
+          Subscribe to receive real-time browser push alerts whenever a guest message breaches the SLA threshold.
+          Works on desktop browsers and Android Chrome.
+        </p>
+
+        <div class="alert border-0 mb-4 p-3" style="background:#eff6ff;border-radius:.5rem;font-size:.82rem">
+          <i class="bi bi-info-circle-fill text-primary me-2"></i>
+          Your browser will ask for <strong>notification permission</strong>. Please click <strong>Allow</strong>.
+        </div>
+
+        <button id="subscribeBtn" class="btn btn-primary btn-lg w-100 mb-3" onclick="subscribe()">
+          <i class="bi bi-bell-fill me-2"></i>Enable Push Alerts for This Browser
+        </button>
+
+        <div id="statusMsg" class="text-center text-secondary" style="font-size:.85rem"></div>
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}
 

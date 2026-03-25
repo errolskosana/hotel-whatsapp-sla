@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     # Redis (used by Celery)
     redis_url: str = "redis://localhost:6379/0"
 
+    # Multi-tenant control plane (optional — omit for single-tenant mode)
+    control_plane_db_url: str | None = None
+    seed_superadmin_email: str | None = None
+    seed_superadmin_password: str | None = None
+    # Slug used to register the demo hotel in the control plane (e.g. "demo-hotel")
+    seed_hotel_slug: str | None = None
+
     # Seed demo hotel
     seed_hotel_name: str | None = None
     seed_hotel_phone_number_id: str | None = None
