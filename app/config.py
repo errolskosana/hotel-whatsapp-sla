@@ -9,6 +9,20 @@ class Settings(BaseSettings):
     # WhatsApp / Meta
     meta_app_secret: str
     whatsapp_verify_token: str
+    whatsapp_api_version: str = "v25.0"
+    # WhatsApp Business Account ID. Not used for sending (that keys off
+    # phone_number_id) — needed for template management via
+    # /{waba_id}/message_templates.
+    whatsapp_business_account_id: str | None = None
+    whatsapp_timeout_seconds: float = 15.0
+    # Retries on transient Meta failures (429/5xx/network); 0 disables them.
+    whatsapp_max_retries: int = 2
+    # Send a read receipt for each inbound guest message.
+    whatsapp_mark_read: bool = True
+    # Approved template used to alert a manager whose 24h window has closed.
+    # Must accept 3 body params: hotel name, room/guest label, message excerpt.
+    whatsapp_escalation_template: str | None = None
+    whatsapp_template_language: str = "en"
 
     # Encryption
     encryption_master_key: str

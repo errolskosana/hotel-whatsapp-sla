@@ -14,6 +14,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -33,7 +34,10 @@ from app.auth import (
 )
 from app.seed import seed_demo
 from app.crypto import decrypt_str, encrypt_str
-from app.whatsapp import verify_webhook_signature, send_whatsapp_text
+from app.whatsapp import (
+    verify_webhook_signature, send_whatsapp_text, mark_message_read,
+    close_async_client, first_message_id, within_service_window, WhatsAppError,
+)
 from app.ai import top_k_chunks, should_auto_answer, compose_grounded_answer
 from app.csv_import import import_guest_stays_csv
 from app.logger import configure_logging, get_logger
@@ -73,6 +77,18 @@ def _startup():
     # Initialise control plane and seed super admin + demo tenant (if configured)
     if settings.control_plane_db_url:
         _seed_control_plane()
+        # Tenant DBs are migrated at provisioning time only, so a deploy that
+        # ships a migration leaves older tenants on the old schema until
+        # `python -m app.scripts.migrate_tenants` runs. Surface that here
+        # rather than letting it appear as failing webhooks.
+        from app.tenant_migrations import warn_on_schema_drift
+        warn_on_schema_drift()
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    # Release the pooled connections to the Graph API.
+    await close_async_client()
 
 
 def _seed_control_plane():
@@ -274,6 +290,301 @@ def whatsapp_verify(request: Request):
     raise HTTPException(status_code=403, detail="Verification failed")
 
 
+# Exact-match keywords. Compared against the whole normalised body so a QR
+# payload ("START HOTEL_ID=… ROOM=…") is never mistaken for a bare keyword.
+_OPT_OUT_KEYWORDS = {"STOP", "UNSUBSCRIBE", "OPT OUT", "OPTOUT", "CANCEL", "QUIT"}
+_OPT_IN_KEYWORDS = {"START", "UNSTOP", "SUBSCRIBE", "RESUME"}
+
+
+def _describe_inbound(m: dict) -> str:
+    """Render an inbound message of any type as the text staff will read."""
+    msg_type = m.get("type", "unknown")
+    if msg_type == "text":
+        return m.get("text", {}).get("body", "")
+    if msg_type == "image":
+        caption = m.get("image", {}).get("caption", "")
+        return f"[image]{(' — ' + caption) if caption else ''}"
+    if msg_type == "audio":
+        return "[voice message]"
+    if msg_type == "video":
+        caption = m.get("video", {}).get("caption", "")
+        return f"[video]{(' — ' + caption) if caption else ''}"
+    if msg_type == "document":
+        filename = m.get("document", {}).get("filename", "")
+        return f"[document{': ' + filename if filename else ''}]"
+    if msg_type == "location":
+        loc = m.get("location", {})
+        return f"[location: {loc.get('latitude')},{loc.get('longitude')}]"
+    if msg_type == "button":
+        return m.get("button", {}).get("text", "[button reply]")
+    if msg_type == "interactive":
+        interactive = m.get("interactive", {})
+        reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+        return reply.get("title", "[interactive reply]")
+    if msg_type == "contacts":
+        return "[shared contact]"
+    if msg_type == "sticker":
+        return "[sticker]"
+    return f"[{msg_type} message]"
+
+
+def _open_db_for_phone_number(phone_number_id: str) -> Session | None:
+    """Resolve the DB session that owns this WhatsApp number.
+
+    Multi-tenant: look the tenant up in the control plane and open its DB.
+    Single-tenant: the main DB.
+    """
+    if settings.control_plane_db_url:
+        from app.control_plane import get_cp_session_direct, TenantHotel
+        from app.tenant_db import get_session_for_tenant
+        cp = get_cp_session_direct()
+        if cp:
+            try:
+                tenant = cp.execute(
+                    select(TenantHotel).where(
+                        TenantHotel.whatsapp_phone_number_id == phone_number_id
+                    )
+                ).scalar_one_or_none()
+            finally:
+                cp.close()
+            if tenant:
+                return get_session_for_tenant(str(tenant.id))
+        return None
+    return next(db_session())
+
+
+def _apply_status_callbacks(db: Session, hotel: Hotel, statuses: list[dict]) -> None:
+    """Record sent/delivered/read/failed against the outbound message."""
+    for s in statuses:
+        wa_msg_id = s.get("id")
+        new_status = s.get("status")
+        if not (wa_msg_id and new_status):
+            continue
+        msg = db.execute(
+            select(Message).where(
+                Message.hotel_id == hotel.id,
+                Message.wa_message_id == wa_msg_id,
+            )
+        ).scalar_one_or_none()
+        if not msg:
+            continue
+        msg.wa_status = new_status
+        errors = s.get("errors") or []
+        if errors:
+            err = errors[0]
+            msg.wa_error_code = err.get("code")
+            msg.wa_error_title = (err.get("title") or err.get("message") or "")[:255]
+            log.error(
+                "whatsapp_delivery_failed",
+                hotel_id=str(hotel.id),
+                wa_message_id=wa_msg_id,
+                meta_code=msg.wa_error_code,
+                meta_title=msg.wa_error_title,
+            )
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            log.warning("status_update_failed", wa_message_id=wa_msg_id, error=str(exc))
+
+
+def _get_or_create_conversation(db: Session, hotel: Hotel, wa_id: str) -> Conversation:
+    conv = db.execute(
+        select(Conversation).where(
+            Conversation.hotel_id == hotel.id, Conversation.wa_id == wa_id
+        )
+    ).scalar_one_or_none()
+    if conv:
+        return conv
+    conv = Conversation(hotel_id=hotel.id, wa_id=wa_id, last_message_at=datetime.utcnow())
+    db.add(conv)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Concurrent webhook created it first — take theirs.
+        db.rollback()
+        conv = db.execute(
+            select(Conversation).where(
+                Conversation.hotel_id == hotel.id, Conversation.wa_id == wa_id
+            )
+        ).scalar_one()
+    return conv
+
+
+def _bind_room_from_qr(db: Session, hotel: Hotel, conv: Conversation, body: str) -> None:
+    """Attach room + current stay using the QR deep-link payload."""
+    try:
+        room = body.split("ROOM=", 1)[1].split()[0].strip()
+        conv.room_number = room
+        today = date.today()
+        stay = db.execute(
+            select(GuestStay)
+            .where(GuestStay.hotel_id == hotel.id)
+            .where(GuestStay.room_number == room)
+            .where(GuestStay.arrival_date <= today)
+            .where(GuestStay.departure_date >= today)
+            .order_by(GuestStay.arrival_date.desc())
+        ).scalars().first()
+        conv.stay_id = stay.id if stay else None
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        log.warning("room_bind_failed", wa_id=conv.wa_id, error=str(exc))
+
+
+def _hotel_knowledge(db: Session, hotel: Hotel) -> list[str]:
+    """Active knowledge chunks for a hotel, or the built-in fallback.
+
+    Loaded once per webhook delivery rather than once per message — a batch is
+    always for a single hotel, so re-querying per message is pure waste.
+    """
+    db_chunks = db.execute(
+        select(KnowledgeChunk).where(
+            KnowledgeChunk.hotel_id == hotel.id,
+            KnowledgeChunk.is_active == True,
+        )
+    ).scalars().all()
+    return [c.content for c in db_chunks] if db_chunks else _DEFAULT_KNOWLEDGE
+
+
+async def _maybe_auto_answer(
+    db: Session, hotel: Hotel, conv: Conversation, msg: Message, body: str,
+    knowledge: list[str],
+) -> None:
+    """Answer from hotel knowledge if confident, else leave it for staff."""
+    # Embedding is blocking CPU work. Run it off the event loop, or a batch of
+    # guest messages stalls every other request on this worker until it drains
+    # — including the ack Meta is waiting for.
+    retrieved = await asyncio.to_thread(top_k_chunks, body, knowledge, 3)
+    if not should_auto_answer(retrieved):
+        return
+
+    answer = compose_grounded_answer(body, retrieved)
+    try:
+        token = decrypt_str(hotel.whatsapp_access_token_enc)
+        sent = await send_whatsapp_text(
+            phone_number_id=hotel.whatsapp_phone_number_id,
+            access_token=token,
+            to_e164_or_waid=conv.wa_id,
+            text=answer,
+            reply_to_wa_message_id=msg.wa_message_id,
+        )
+    except WhatsAppError as exc:
+        log.error("ai_reply_failed", wa_id=conv.wa_id, **exc.as_log_fields())
+        return
+    except Exception as exc:
+        log.error("ai_reply_failed", wa_id=conv.wa_id, error=str(exc))
+        return
+
+    # The guest has been answered — take it out of the SLA queue, otherwise it
+    # escalates 20s later despite having a reply already sitting in the thread.
+    msg.status = "auto_replied"
+    msg.actioned_at = datetime.utcnow()
+    msg.actioned_type = "auto"
+
+    db.add(Message(
+        hotel_id=hotel.id,
+        conversation_id=conv.id,
+        direction="out",
+        # Needed for delivery-status callbacks to find this message later.
+        wa_message_id=first_message_id(sent),
+        body=answer,
+        received_at=datetime.utcnow(),
+        status="sent",
+        wa_status="sent",
+    ))
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        log.error("ai_reply_record_failed", wa_id=conv.wa_id, error=str(exc))
+
+
+async def _handle_inbound_message(
+    db: Session, hotel: Hotel, m: dict, knowledge: list[str]
+) -> None:
+    wa_id = m["from"]
+    wa_msg_id = m.get("id")
+    body = _describe_inbound(m)
+    normalised = body.strip().upper()
+    now = datetime.utcnow()
+
+    conv = _get_or_create_conversation(db, hotel, wa_id)
+
+    is_opt_out = normalised in _OPT_OUT_KEYWORDS
+    is_qr_start = normalised.startswith("START HOTEL_ID=")
+    is_opt_in = not is_opt_out and (normalised in _OPT_IN_KEYWORDS or is_qr_start)
+
+    # Subscription state this message leaves the conversation in.
+    if is_opt_out:
+        opted_out = True
+    elif is_opt_in:
+        opted_out = False
+    else:
+        opted_out = conv.opted_out
+
+    # Store the message and apply its effect in ONE transaction. The unique
+    # (hotel_id, wa_message_id) constraint is the idempotency gate: Meta
+    # redelivers on timeout, and a keyword applied twice is not harmless — a
+    # replayed STOP would silently re-opt-out a guest who has since opted back
+    # in. Anything that must happen once per message goes below the commit.
+    msg = Message(
+        hotel_id=hotel.id,
+        conversation_id=conv.id,
+        direction="in",
+        wa_message_id=wa_msg_id,
+        body=body,
+        received_at=now,
+        # An opted-out guest still gets their message stored and shown, but it
+        # stays out of the SLA queue: staff cannot reply, so escalating it
+        # would loop forever. A STOP itself is a control message, not a request.
+        status="closed" if (opted_out or is_opt_out) else "unactioned",
+        actioned_type="opted_out" if (opted_out or is_opt_out) else None,
+    )
+    db.add(msg)
+    conv.last_message_at = now
+    conv.last_inbound_at = now  # (re)opens Meta's 24h free-form window
+    if is_opt_out:
+        conv.opted_out = True
+        conv.opted_out_at = now
+    elif is_opt_in and conv.opted_out:
+        conv.opted_out = False
+        conv.opted_out_at = None
+
+    try:
+        db.commit()
+    except IntegrityError:
+        # Meta redelivered a message we already stored (uq_wa_msgid_per_hotel).
+        # The rollback also discards the keyword effect above, which is the
+        # point: this delivery has already been accounted for.
+        db.rollback()
+        log.info("duplicate_webhook_message", wa_message_id=wa_msg_id)
+        return
+
+    if is_opt_out:
+        log.info("guest_opted_out", hotel_id=str(hotel.id), wa_id=wa_id)
+        return  # no read receipt, no auto-reply — the guest asked us to stop
+    if is_opt_in:
+        log.info("guest_opted_in", hotel_id=str(hotel.id), wa_id=wa_id)
+
+    # Read receipt is courtesy only — never let it block message handling.
+    if settings.whatsapp_mark_read and wa_msg_id:
+        try:
+            await mark_message_read(
+                phone_number_id=hotel.whatsapp_phone_number_id,
+                access_token=decrypt_str(hotel.whatsapp_access_token_enc),
+                wa_message_id=wa_msg_id,
+            )
+        except Exception as exc:
+            log.warning("mark_read_failed", wa_message_id=wa_msg_id, error=str(exc))
+
+    if is_qr_start and "ROOM=" in body:
+        _bind_room_from_qr(db, hotel, conv, body)
+
+    if not conv.opted_out:
+        await _maybe_auto_answer(db, hotel, conv, msg, body, knowledge)
+
+
 @app.post("/webhooks/whatsapp", response_class=PlainTextResponse)
 @limiter.limit("60/minute")
 async def whatsapp_webhook(request: Request):
@@ -283,199 +594,57 @@ async def whatsapp_webhook(request: Request):
     if not verify_webhook_signature(settings.meta_app_secret, raw, sig):
         raise HTTPException(status_code=403, detail="Bad signature")
 
-    payload = json.loads(raw.decode("utf-8"))
-
-    # Extract routing info
     try:
-        entry = payload["entry"][0]
-        value = entry["changes"][0]["value"]
-        phone_number_id = value["metadata"]["phone_number_id"]
-    except Exception as exc:
-        log.warning("webhook_parse_error", error=str(exc), payload=str(payload)[:200])
+        payload = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        log.warning("webhook_bad_json", error=str(exc))
         return "OK"
 
-    # Resolve DB session for this phone number
-    # Multi-tenant: look up tenant by phone_number_id, use that DB
-    # Single-tenant: fall through to main DB
-    db_ctx = None
-    if settings.control_plane_db_url:
-        from app.control_plane import get_cp_session_direct, TenantHotel
-        from app.tenant_db import get_session_for_tenant
-        cp = get_cp_session_direct()
-        if cp:
-            try:
-                tenant = cp.execute(
-                    select(TenantHotel).where(TenantHotel.whatsapp_phone_number_id == phone_number_id)
-                ).scalar_one_or_none()
-            finally:
-                cp.close()
-            if tenant:
-                db_ctx = get_session_for_tenant(str(tenant.id))
-
-    if db_ctx is None:
-        db_ctx = next(db_session())
-
-    db = db_ctx
+    # Meta batches: one delivery can carry several entries, each with several
+    # changes, each potentially for a different phone number. Reading only
+    # entry[0].changes[0] silently drops the rest.
+    sessions: dict[str, Session] = {}
     try:
-        hotel = db.execute(
-            select(Hotel).where(Hotel.whatsapp_phone_number_id == phone_number_id)
-        ).scalar_one_or_none()
-        if not hotel:
-            log.warning("unknown_phone_number_id", phone_number_id=phone_number_id)
-            return "OK"  # always ack to Meta; 4xx causes retries
+        for entry in payload.get("entry") or []:
+            for change in entry.get("changes") or []:
+                value = change.get("value") or {}
+                phone_number_id = (value.get("metadata") or {}).get("phone_number_id")
+                if not phone_number_id:
+                    continue
 
-        # Handle delivery status updates
-        statuses = value.get("statuses") or []
-        for s in statuses:
-            wa_msg_id = s.get("id")
-            new_status = s.get("status")  # sent/delivered/read/failed
-            if wa_msg_id and new_status:
-                msg = db.execute(
-                    select(Message).where(
-                        Message.hotel_id == hotel.id,
-                        Message.wa_message_id == wa_msg_id,
-                    )
+                if phone_number_id not in sessions:
+                    db = _open_db_for_phone_number(phone_number_id)
+                    if db is None:
+                        log.warning("unknown_tenant_phone_number_id", phone_number_id=phone_number_id)
+                        continue
+                    sessions[phone_number_id] = db
+                db = sessions[phone_number_id]
+
+                hotel = db.execute(
+                    select(Hotel).where(Hotel.whatsapp_phone_number_id == phone_number_id)
                 ).scalar_one_or_none()
-                if msg:
-                    msg.wa_status = new_status
-                    db.commit()
+                if not hotel:
+                    log.warning("unknown_phone_number_id", phone_number_id=phone_number_id)
+                    continue  # always ack to Meta; 4xx causes endless retries
 
-        # Handle inbound messages
-        messages = value.get("messages") or []
-        for m in messages:
-            wa_id = m["from"]
-            msg_type = m.get("type", "unknown")
+                _apply_status_callbacks(db, hotel, value.get("statuses") or [])
 
-            # Opt-out handling
-            if msg_type == "text":
-                body_text = m.get("text", {}).get("body", "")
-                if body_text.strip().upper() in ("STOP", "UNSUBSCRIBE", "OPT OUT", "OPTOUT"):
-                    conv = db.execute(
-                        select(Conversation).where(
-                            Conversation.hotel_id == hotel.id,
-                            Conversation.wa_id == wa_id,
+                messages = value.get("messages") or []
+                knowledge = _hotel_knowledge(db, hotel) if messages else []
+                for m in messages:
+                    try:
+                        await _handle_inbound_message(db, hotel, m, knowledge)
+                    except Exception as exc:
+                        # One bad message must not drop the rest of the batch.
+                        db.rollback()
+                        log.error(
+                            "inbound_message_failed",
+                            wa_message_id=m.get("id"),
+                            error=str(exc),
                         )
-                    ).scalar_one_or_none()
-                    if conv:
-                        conv.opted_out = True
-                        db.commit()
-                    log.info("guest_opted_out", hotel_id=str(hotel.id), wa_id=wa_id)
-                    continue
-                body = body_text
-            elif msg_type == "image":
-                caption = m.get("image", {}).get("caption", "")
-                body = f"[image]{(' — ' + caption) if caption else ''}"
-            elif msg_type == "audio":
-                body = "[voice message]"
-            elif msg_type == "video":
-                caption = m.get("video", {}).get("caption", "")
-                body = f"[video]{(' — ' + caption) if caption else ''}"
-            elif msg_type == "document":
-                filename = m.get("document", {}).get("filename", "")
-                body = f"[document{': ' + filename if filename else ''}]"
-            elif msg_type == "location":
-                loc = m.get("location", {})
-                body = f"[location: {loc.get('latitude')},{loc.get('longitude')}]"
-            else:
-                body = f"[{msg_type} message]"
-
-            # Idempotency: skip if we already processed this wa_message_id
-            wa_msg_id = m.get("id")
-            if wa_msg_id:
-                existing = db.execute(
-                    select(Message).where(
-                        Message.hotel_id == hotel.id,
-                        Message.wa_message_id == wa_msg_id,
-                    )
-                ).scalar_one_or_none()
-                if existing:
-                    continue
-
-            conv = db.execute(
-                select(Conversation).where(
-                    Conversation.hotel_id == hotel.id, Conversation.wa_id == wa_id
-                )
-            ).scalar_one_or_none()
-            if not conv:
-                conv = Conversation(
-                    hotel_id=hotel.id, wa_id=wa_id, last_message_at=datetime.utcnow()
-                )
-                db.add(conv)
-                db.commit()
-
-            # Skip opted-out guests
-            if conv.opted_out:
-                log.info("skipped_opted_out_guest", wa_id=wa_id)
-                continue
-
-            msg = Message(
-                hotel_id=hotel.id,
-                conversation_id=conv.id,
-                direction="in",
-                wa_message_id=wa_msg_id,
-                body=body,
-                received_at=datetime.utcnow(),
-                status="unactioned",
-            )
-            db.add(msg)
-            conv.last_message_at = datetime.utcnow()
-            db.commit()
-
-            # Bind room/stay from QR START message
-            if isinstance(body, str) and body.startswith("START") and "ROOM=" in body and "HOTEL_ID=" in body:
-                try:
-                    room = body.split("ROOM=", 1)[1].split()[0].strip()
-                    conv.room_number = room
-                    today = date.today()
-                    stay = db.execute(
-                        select(GuestStay)
-                        .where(GuestStay.hotel_id == hotel.id)
-                        .where(GuestStay.room_number == room)
-                        .where(GuestStay.arrival_date <= today)
-                        .where(GuestStay.departure_date >= today)
-                        .order_by(GuestStay.arrival_date.desc())
-                    ).scalars().first()
-                    conv.stay_id = stay.id if stay else None
-                    db.commit()
-                except Exception as exc:
-                    db.rollback()
-                    log.warning("room_bind_failed", wa_id=wa_id, error=str(exc))
-
-            # Guardrailed AI — use DB knowledge chunks, fall back to defaults
-            db_chunks = db.execute(
-                select(KnowledgeChunk).where(
-                    KnowledgeChunk.hotel_id == hotel.id,
-                    KnowledgeChunk.is_active == True,
-                )
-            ).scalars().all()
-            knowledge_chunks = [c.content for c in db_chunks] if db_chunks else _DEFAULT_KNOWLEDGE
-            retrieved = top_k_chunks(body, knowledge_chunks, k=3)
-            if should_auto_answer(retrieved):
-                answer = compose_grounded_answer(body, retrieved)
-                try:
-                    token = decrypt_str(hotel.whatsapp_access_token_enc)
-                    await send_whatsapp_text(
-                        phone_number_id=hotel.whatsapp_phone_number_id,
-                        access_token=token,
-                        to_e164_or_waid=wa_id,
-                        text=answer,
-                    )
-                    # Record outbound AI reply
-                    out_msg = Message(
-                        hotel_id=hotel.id,
-                        conversation_id=conv.id,
-                        direction="out",
-                        body=answer,
-                        received_at=datetime.utcnow(),
-                        status="auto_replied",
-                    )
-                    db.add(out_msg)
-                    db.commit()
-                except Exception as exc:
-                    log.error("ai_reply_failed", wa_id=wa_id, error=str(exc))
-
     finally:
-        db.close()
+        for db in sessions.values():
+            db.close()
 
     return "OK"
 
@@ -841,9 +1010,12 @@ def analytics_page(
         )
     ).scalar() or 0
 
+    # Resolution is tracked on the inbound message the guest sent, so these
+    # stay comparable with total_in above.
     total_replied = db.execute(
         select(func.count(Message.id)).where(
             Message.hotel_id == hotel_id,
+            Message.direction == "in",
             Message.status.in_(["replied", "auto_replied"]),
             Message.received_at >= last_n,
         )
@@ -852,6 +1024,7 @@ def analytics_page(
     total_auto_replied = db.execute(
         select(func.count(Message.id)).where(
             Message.hotel_id == hotel_id,
+            Message.direction == "in",
             Message.status == "auto_replied",
             Message.received_at >= last_n,
         )
@@ -872,7 +1045,8 @@ def analytics_page(
             Message.received_at >= d0, Message.received_at < d1,
         )).scalar() or 0
         c_rep = db.execute(select(func.count(Message.id)).where(
-            Message.hotel_id == hotel_id, Message.status.in_(["replied", "auto_replied"]),
+            Message.hotel_id == hotel_id, Message.direction == "in",
+            Message.status.in_(["replied", "auto_replied"]),
             Message.received_at >= d0, Message.received_at < d1,
         )).scalar() or 0
         daily_labels.append(day.strftime("%b %d"))
@@ -1051,17 +1225,42 @@ async def reply_message(
     if conv.opted_out:
         raise HTTPException(status_code=400, detail="Guest has opted out")
 
+    # Free-form replies are only deliverable inside Meta's 24h service window.
+    # Fail here with an explanation rather than letting Meta reject it with an
+    # opaque 131047 after we have already marked the message replied.
+    if not within_service_window(conv.last_inbound_at):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The 24-hour WhatsApp reply window for this guest has closed. "
+                "Reach the guest by phone, or send an approved template."
+            ),
+        )
+
     try:
         token = decrypt_str(hotel.whatsapp_access_token_enc)
     except Exception as exc:
         log.error("token_decrypt_failed", hotel_id=str(hotel.id), error=str(exc))
         raise HTTPException(status_code=500, detail="WhatsApp token unavailable")
-    sent = await send_whatsapp_text(
-        phone_number_id=hotel.whatsapp_phone_number_id,
-        access_token=token,
-        to_e164_or_waid=conv.wa_id,
-        text=reply,
-    )
+
+    try:
+        sent = await send_whatsapp_text(
+            phone_number_id=hotel.whatsapp_phone_number_id,
+            access_token=token,
+            to_e164_or_waid=conv.wa_id,
+            text=reply,
+            reply_to_wa_message_id=msg.wa_message_id,
+        )
+    except WhatsAppError as exc:
+        # Surface Meta's reason and leave the message unactioned so the SLA
+        # clock keeps running — the guest has not actually been answered.
+        log.error("staff_reply_failed", message_id=str(msg.id), **exc.as_log_fields())
+        detail = (
+            "WhatsApp refused the message: the 24-hour reply window has closed."
+            if exc.needs_template
+            else f"WhatsApp could not deliver this reply ({exc.message})."
+        )
+        raise HTTPException(status_code=502, detail=detail)
 
     msg.status = "replied"
     msg.actioned_at = datetime.utcnow()
@@ -1070,7 +1269,7 @@ async def reply_message(
     db.commit()
 
     # Record outbound message
-    wa_out_id = sent.get("messages", [{}])[0].get("id") if sent else None
+    wa_out_id = first_message_id(sent)
     out_msg = Message(
         hotel_id=hotel.id,
         conversation_id=conv.id,
@@ -1079,6 +1278,7 @@ async def reply_message(
         body=reply,
         received_at=datetime.utcnow(),
         status="sent",
+        wa_status="sent",
         actioned_by_user_id=uuid.UUID(user.staff_user_id),
     )
     db.add(out_msg)
