@@ -7,8 +7,11 @@ from app.config import settings
 from app.db import SessionLocal
 from app.models import Hotel, Message, Escalation, PushSubscription
 from app.crypto import decrypt_str
+from app.models import Conversation
 from app.push import send_push
-from app.whatsapp import send_whatsapp_text_sync
+from app.whatsapp import (
+    send_whatsapp_text_sync, send_whatsapp_template_sync, WhatsAppError,
+)
 from app.logger import get_logger
 
 log = get_logger(__name__)
@@ -34,6 +37,80 @@ celery_app.conf.beat_schedule = {
 
 def _db() -> Session:
     return SessionLocal()
+
+
+def _notify_manager_whatsapp(hotel: Hotel, msg: Message, room_label: str) -> None:
+    """Alert the manager on WhatsApp about an SLA breach.
+
+    A manager who has not messaged the business number in the last 24 hours is
+    outside Meta's service window, and a free-form text is rejected with error
+    131047. That silently loses the alert — which is the one message in this
+    system that must not be lost. So prefer the approved template whenever one
+    is configured, and fall back to free-form only when it is not.
+    """
+    token = decrypt_str(hotel.whatsapp_access_token_enc)
+    template = settings.whatsapp_escalation_template
+
+    if template:
+        # Trim before slicing: a whitespace-only body would otherwise become an
+        # empty parameter, which Meta rejects outright.
+        excerpt = (msg.body or "").strip()[:120] or "(no text)"
+        try:
+            send_whatsapp_template_sync(
+                phone_number_id=hotel.whatsapp_phone_number_id,
+                access_token=token,
+                to_e164_or_waid=hotel.manager_wa_e164,
+                template_name=template,
+                body_params=[hotel.name, room_label, excerpt],
+            )
+            return
+        except WhatsAppError as exc:
+            if not exc.is_template_problem:
+                raise
+            # Template still in review, paused, or misconfigured. Free-form
+            # still reaches a manager who is inside the 24h window, and a lost
+            # alert is worse than a downgraded one.
+            log.warning(
+                "escalation_template_unusable",
+                hotel_id=str(hotel.id),
+                template=template,
+                falling_back_to="free-form text",
+                **exc.as_log_fields(),
+            )
+
+    text = (
+        f"SLA breach at {hotel.name}: {room_label} message not actioned in "
+        f"{hotel.sla_seconds}s.\n\n\"{msg.body[:200]}\""
+    )
+    try:
+        send_whatsapp_text_sync(
+            phone_number_id=hotel.whatsapp_phone_number_id,
+            access_token=token,
+            to_e164_or_waid=hotel.manager_wa_e164,
+            text=text,
+        )
+    except WhatsAppError as exc:
+        if exc.needs_template:
+            log.error(
+                "escalation_blocked_by_service_window",
+                hotel_id=str(hotel.id),
+                message_id=str(msg.id),
+                remedy=(
+                    "approve the template named in WHATSAPP_ESCALATION_TEMPLATE"
+                    if template
+                    else "set WHATSAPP_ESCALATION_TEMPLATE to an approved template name"
+                ),
+                **exc.as_log_fields(),
+            )
+        raise
+
+
+def _room_label(db: Session, msg: Message) -> str:
+    """Human-readable origin of the breaching message, for the alert body."""
+    conv = db.get(Conversation, msg.conversation_id)
+    if conv and conv.room_number:
+        return f"Room {conv.room_number}"
+    return "Guest"
 
 
 def _scan_db(db: Session) -> None:
@@ -75,19 +152,14 @@ def _scan_db(db: Session) -> None:
             log.warning("escalation_insert_failed", message_id=str(msg.id), error=str(exc))
             continue
 
-        token = decrypt_str(hotel.whatsapp_access_token_enc)
-
         try:
-            text = f"SLA breach: guest message not actioned in {hotel.sla_seconds}s. message_id={msg.id}"
-            send_whatsapp_text_sync(
-                phone_number_id=hotel.whatsapp_phone_number_id,
-                access_token=token,
-                to_e164_or_waid=hotel.manager_wa_e164,
-                text=text,
-            )
+            _notify_manager_whatsapp(hotel, msg, _room_label(db, msg))
             esc.whatsapp_notified_at = datetime.utcnow()
             db.commit()
             log.info("manager_notified_whatsapp", message_id=str(msg.id))
+        except WhatsAppError as exc:
+            db.rollback()
+            log.error("manager_whatsapp_notify_failed", message_id=str(msg.id), **exc.as_log_fields())
         except Exception as exc:
             db.rollback()
             log.error("manager_whatsapp_notify_failed", message_id=str(msg.id), error=str(exc))

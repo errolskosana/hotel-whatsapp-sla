@@ -73,7 +73,10 @@ class Conversation(Base):
     room_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
     stay_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("guest_stays.id"), nullable=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
+    # Last inbound message from the guest — start of Meta's 24h service window.
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     opted_out: Mapped[bool] = mapped_column(Boolean(), default=False)
+    opted_out_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(), default=datetime.utcnow)
 
     messages = relationship("Message", back_populates="conversation")
@@ -92,6 +95,9 @@ class Message(Base):
     wa_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     body: Mapped[str] = mapped_column(Text())
     wa_status: Mapped[str | None] = mapped_column(String(16), nullable=True)  # sent/delivered/read/failed
+    # Populated from a 'failed' status callback so undelivered sends are diagnosable.
+    wa_error_code: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    wa_error_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     received_at: Mapped[datetime] = mapped_column(DateTime(), default=datetime.utcnow, index=True)  # SLA start
     actioned_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
