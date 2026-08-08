@@ -16,3 +16,7 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Per-machine Claude Code settings. Holds absolute paths and command
+# allowlists that can capture credentials, so it must never be committed.
+.claude/settings.local.json
